@@ -1,0 +1,15 @@
+# 認証情報・シークレット（絶対にコミットしないこと）
+.env
+config/google_credentials.json
+config/google_token.pickle
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 出力ファイル
+output/*.md
+output/*.log

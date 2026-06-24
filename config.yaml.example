@@ -1,0 +1,47 @@
+# ============================================================
+# 週次進捗報告 自動化ツール 設定ファイル
+# ============================================================
+
+# --- Backlog 設定 ---
+backlog:
+  base_url: "https://adastria.backlog.jp"
+  api_key: "${BACKLOG_API_KEY}"          # .env の BACKLOG_API_KEY に設定
+  my_user_id: YOUR_BACKLOG_USER_ID          # 数値ID（下記コマンドで確認可能）
+  report_project_key: "SALES_TEAM"          # 転記先プロジェクトキー
+
+# --- Slack 設定 ---
+slack:
+  bot_token: "xoxb-YOUR-SLACK-BOT-TOKEN"   # Slack App > OAuth & Permissions
+  my_user_id: "UXXXXXXXXX"                  # SlackのユーザーID（プロフィールから確認）
+
+# --- Google Calendar 設定 ---
+google_calendar:
+  credentials_file: "config/google_credentials.json"  # OAuthクレデンシャルJSON
+  calendar_ids:
+    - "primary"                             # メインカレンダー（追加カレンダーはIDを追加）
+
+# --- Claude API 設定（要約機能） ---
+# 組織管理者から権限が付与されている場合のみ使用
+# 未設定の場合はルールベースの要約にフォールバック
+claude:
+  api_key: ""                               # AnthropicダッシュボードからAPIキーを取得
+  enabled: false                            # trueにするとAI要約を使用
+  model: "claude-sonnet-4-6"
+
+# --- レポート設定 ---
+report:
+  # 対象期間（月曜〜金曜の1週間）
+  lookback_days: 7
+  # 出力先ディレクトリ
+  output_dir: "output"
+  # Backlogへの自動転記（falseにするとローカル出力のみ）
+  auto_post_to_backlog: true
+  # ドライラン（trueにするとBacklogへの書き込みをスキップ）
+  dry_run: false
+
+# --- スケジューラー設定 ---
+schedule:
+  # 毎週金曜 18:00 に実行
+  day_of_week: "friday"
+  hour: 18
+  minute: 0

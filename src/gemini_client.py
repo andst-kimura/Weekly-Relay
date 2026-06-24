@@ -1,0 +1,274 @@
+"""
+Gemini API クライアント
+議事録要約・転記フォーマット生成・親課題判別に使用する
+"""
+import logging
+
+logger = logging.getLogger(__name__)
+
+# 親課題判別：キーワード一致ではなく業務文脈で厳密に判断させる
+_DETECT_PARENT_PROMPT = """\
+以下の業務内容を、最も関連性の高い親課題に紐付けてください。
+
+## 親課題一覧
+{parent_issues_text}
+
+## 転記したい業務内容
+{content}
+
+## 判定ルール（厳守）
+- キーワードの表面的な一致ではなく、業務の目的・文脈・担当領域が一致しているかで判断してください
+- 関連性が70%以上確信できる場合のみ親課題キーを返してください
+- 複数の親課題に同程度に関連する場合・関連性が不明確な場合・内容が空・不明な場合は「NONE」を返してください
+- 最も関連性の高い親課題のISSUEキーを1行だけ返してください（例: SALES_TEAM-27）
+- 判定できない場合は「NONE」とだけ返してください
+- 説明・前置き・後置きは一切不要です
+"""
+
+# Backlogコメントフォーマット生成
+_FORMAT_COMMENT_PROMPT = """\
+あなたは社内の週次進捗報告担当者です。
+以下のデータソースを元に、転記先の親課題に関連する内容を指定フォーマットで整理してください。
+
+## 転記先の親課題
+{issue_summary}
+
+## データソース（対象週の活動）
+{sources_text}
+
+## 出力フォーマット（このフォーマットのみ出力。前置き・後置き不要）
+=Status=
+・（今週の進捗・対応内容を箇条書き。データソース内の日付がある場合は先頭に「(MM/DD)」形式で記載）
+
+=NextAction=
+・（次のアクション・残課題を箇条書き。不明な場合は「引き続き対応中」）
+
+## 作成ルール
+- 箇条書きは「・」で始める（「-」「*」は使わない）
+- 転記先の親課題に関連する内容のみ抽出・要約する
+- 日付情報はデータソースから優先的に使用する
+- 具体的な課題名・会議名・決定事項を含める
+- 完了済みの内容は =Status= に、未完了・今後の予定は =NextAction= に記載する
+"""
+
+# 議事録要約
+_SUMMARY_PROMPT = """\
+以下は Google Meet の議事録です。
+次の3セクションを Markdown 形式で出力してください。出力のみ返し、前置き・後置きは不要です。
+
+## 決定事項
+- （箇条書き）
+
+## アクションアイテム
+| 内容 | 担当者 | 期限 |
+|---|---|---|
+| ... | ... | ... |
+
+## 議題サマリー
+（100文字程度）
+
+---
+議事録本文：
+{text}
+"""
+
+# チケット対応履歴の要約
+_TICKET_SUMMARY_PROMPT = """\
+以下は Backlog チケットの対応履歴です。
+次の形式で簡潔に整理してください。出力のみ返し、前置き・後置きは不要です。
+
+## 対応概要
+（このチケットで何をしているかを2〜3文で説明）
+
+## 主な対応内容
+- （箇条書きで重要な対応・決定を時系列で列挙。最大8件）
+
+## 現在のステータス
+（チケットの現状と残課題を1〜2文で説明）
+
+---
+チケット概要: {summary}
+ステータス: {status}
+
+対応履歴：
+{history}
+"""
+
+# Slack スレッド要約
+_SLACK_SUMMARY_PROMPT = """\
+以下は Slack チャンネルの発言記録です（自分の発言に ★ 印あり）。
+次の形式で整理してください。出力のみ返し、前置き・後置きは不要です。
+
+## 主なやりとり
+- （箇条書きで重要な話題・決定・依頼を列挙。最大6件）
+
+## 自分のアクション
+- （★印の発言から、自分が行った対応・約束・依頼を列挙）
+
+---
+チャンネル: #{channel}
+期間: {period}
+
+発言記録：
+{messages}
+"""
+
+# 日次サマリー（Gemini版）
+_DAILY_SUMMARY_PROMPT = """\
+あなたは社内AIアシスタント Weekly Relay です。
+以下の当日の活動データを元に、夕方の日次サマリーを Slack 向けに自然な文章で作成してください。
+出力のみ返し、前置き・後置きは不要です。
+
+## フォーマット
+:memo: *Weekly Relay 日次サマリー — {date}*
+
+*今日の主な活動*
+（Backlog・Slack の活動をまとめて3〜5文の自然な文章で。箇条書き不要）
+
+*明日に向けて*
+（未完了タスクや次のアクションを1〜2文で）
+
+---
+活動データ：
+{activities}
+"""
+
+# Gemini が議事録を生成できなかった場合のフレーズ（フィルタリング用）
+_EMPTY_MEETING_PHRASES = [
+    "要約は生成されませんでした",
+    "会議の要約は生成されません",
+    "文字起こしが行われた場合",
+    "サポートされている言語での会話量が不足",
+    "この会議の詳細は生成されませんでした",
+]
+
+
+def is_empty_meeting_doc(doc: dict) -> bool:
+    """議事録の内容が実質的に空（Gemini未生成）かどうか判定"""
+    text = doc.get("text") or ""
+    if len(text.strip()) < 100:
+        return True
+    return any(phrase in text for phrase in _EMPTY_MEETING_PHRASES)
+
+
+class GeminiClient:
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+        self.api_key = api_key
+        self.model = model
+        self._client = None
+        if api_key:
+            try:
+                from google import genai
+                self._client = genai.Client(api_key=api_key)
+                logger.info(f"Gemini API 有効: {model}")
+            except ImportError:
+                logger.warning("google-genai 未インストール。ルールベース要約を使用します")
+
+    @property
+    def enabled(self) -> bool:
+        return self._client is not None
+
+    def _call(self, prompt: str) -> str:
+        """Gemini API を呼び出してテキストを返す共通処理"""
+        response = self._client.models.generate_content(
+            model=self.model, contents=prompt
+        )
+        return response.text.strip()
+
+    def detect_parent_issue(self, content: str, parent_issues: list[dict]) -> str | None:
+        """
+        業務内容テキストから最適な親課題キーを判別して返す。
+        判別不能・関連性が低い場合は None を返す。
+        parent_issues: [{"issue_key": "SALES_TEAM-27", "summary": "ストアアプリ"}, ...]
+        """
+        if not self.enabled or not parent_issues:
+            return None
+        parent_issues_text = "\n".join(
+            f"- {p['issue_key']}: {p['summary']}" for p in parent_issues
+        )
+        prompt = _DETECT_PARENT_PROMPT.format(
+            parent_issues_text=parent_issues_text,
+            content=content,
+        )
+        try:
+            result = self._call(prompt)
+            known_keys = {p["issue_key"] for p in parent_issues}
+            if result in known_keys:
+                logger.info(f"Gemini親課題判別: {result}")
+                return result
+            if "NONE" in result:
+                return None
+            for key in known_keys:
+                if key in result:
+                    logger.info(f"Gemini親課題判別（抽出）: {key}")
+                    return key
+            logger.info(f"Gemini親課題判別: 該当なし（応答: {result[:80]}）")
+            return None
+        except Exception as e:
+            logger.warning(f"Gemini 親課題判別失敗: {e}")
+            return None
+
+    def format_backlog_comment(self, sources_text: str, issue_summary: str) -> str:
+        """
+        データソーステキストから =Status= / =NextAction= 形式のコメントを生成する。
+        失敗時は空文字を返す（呼び出し元でルールベースにフォールバック）。
+        """
+        if not self.enabled:
+            return ""
+        try:
+            prompt = _FORMAT_COMMENT_PROMPT.format(
+                issue_summary=issue_summary,
+                sources_text=sources_text,
+            )
+            return self._call(prompt)
+        except Exception as e:
+            logger.warning(f"Gemini コメント生成失敗（ルールベースにフォールバック）: {e}")
+            return ""
+
+    def summarize_meeting(self, text: str) -> str:
+        """議事録本文を渡して決定事項・アクションアイテム・サマリーを返す"""
+        if not self.enabled:
+            return ""
+        try:
+            prompt = _SUMMARY_PROMPT.format(text=text)
+            return self._call(prompt)
+        except Exception as e:
+            logger.warning(f"Gemini 議事録要約失敗: {e}")
+            return ""
+
+    def summarize_ticket(self, summary: str, status: str, history: str) -> str:
+        """チケットの対応履歴を要約して対応概要・主な内容・現状を返す"""
+        if not self.enabled or not history.strip():
+            return ""
+        try:
+            prompt = _TICKET_SUMMARY_PROMPT.format(
+                summary=summary, status=status, history=history
+            )
+            return self._call(prompt)
+        except Exception as e:
+            logger.warning(f"Gemini チケット要約失敗: {e}")
+            return ""
+
+    def summarize_slack_channel(self, channel: str, period: str, messages: str) -> str:
+        """Slack チャンネルの発言記録をやりとり・自分のアクションに整理して返す"""
+        if not self.enabled or not messages.strip():
+            return ""
+        try:
+            prompt = _SLACK_SUMMARY_PROMPT.format(
+                channel=channel, period=period, messages=messages
+            )
+            return self._call(prompt)
+        except Exception as e:
+            logger.warning(f"Gemini Slack要約失敗: {e}")
+            return ""
+
+    def build_daily_summary(self, date: str, activities: str) -> str:
+        """当日の活動データから Slack 向け日次サマリー文を生成する"""
+        if not self.enabled or not activities.strip():
+            return ""
+        try:
+            prompt = _DAILY_SUMMARY_PROMPT.format(date=date, activities=activities)
+            return self._call(prompt)
+        except Exception as e:
+            logger.warning(f"Gemini 日次サマリー生成失敗: {e}")
+            return ""

@@ -1,0 +1,149 @@
+# ============================================================
+# 週次進捗報告 自動化ツール 設定ファイル
+# ============================================================
+
+# --- Backlog 設定 ---
+backlog:
+  base_url: "https://adastria.backlog.jp"
+  api_key: "${BACKLOG_API_KEY}"          # .env の BACKLOG_API_KEY に設定
+  my_user_id: 582431          # 数値ID（下記コマンドで確認可能）
+  report_project_key: "SALES_TEAM"          # 転記先プロジェクトキー
+  exclude_projects:
+    - "JP1"
+    - "QB_MAINTENANCE"
+    - "BAROQUE_FA_ANDST"
+    - "TSI_FA_ANDST"
+    - "HANES_FA_ANDST"
+    - "UNITEDARROWS_ANDST"
+    - "WEOUR_WORK"
+    - "ASTERIA"
+    - "SLACK_REQUEST"
+    - "GIT_REQUEST"
+    - "PJT_TS_GS"
+    - "VALTES_GENERAL"
+    - "OMNIBUSCORE_ANDST"
+    - "ACTION_COLLECTION"
+    - "PRJ_SELLING_PRICE_CHANGE"
+    - "RAKUTEN_ID"
+    - "RAKUTEN_STOCK"
+# --- Slack 設定 ---
+slack:
+  bot_token: "${SLACK_BOT_TOKEN}"   # .env の SLACK_BOT_TOKEN に設定
+  my_user_id: "U07EQTQ2U21"                  # SlackのユーザーID（プロフィールから確認）
+  channel_mapping:
+    販売チーム_hblab:
+      project_key: "NEW_STORE_APP"
+      parent_issue_key: "SALES_TEAM-27"
+      label: "ストアアプリ（STORE APP）"
+    prj_mobilepos:
+      project_key: "MOBILEPOS"
+      parent_issue_key: "SALES_TEAM-23"
+      label: "モバイルPOS"
+    販売チーム_pdc:
+      project_key: "SIGNAGE"
+      parent_issue_key: "SALES_TEAM-256"
+      label: "PDC/サイネージ"
+
+    # 親課題なし（レポートには記載するが転記は新規起票）
+    販売チーム_ncr:
+      project_key: "CORE_DB,CORE_INCIDENT"
+      parent_issue_key: ""
+      label: "NCR関連"
+    販売チーム_ビジサク:
+      project_key: ""
+      parent_issue_key: ""
+      label: "全体連絡"
+    販売チーム_sts:
+      project_key: ""
+      parent_issue_key: ""
+      label: "STS関連"
+    販売チーム_フィジオ:
+      project_key: ""
+      parent_issue_key: ""
+      label: "フィジオ関連"
+    販売チーム_インフラ:
+      project_key: ""
+      parent_issue_key: ""
+      label: "インフラ関連"
+    販売チームV2:
+      project_key: ""
+      parent_issue_key: ""
+      label: "全体共有"
+    販売チーム_all:
+      project_key: ""
+      parent_issue_key: ""
+      label: "全体共有"
+    販売コーポレートチーム:
+      project_key: ""
+      parent_issue_key: ""
+      label: "コーポレート"
+    販売_データ:
+      project_key: ""
+      parent_issue_key: ""
+      label: "データ関連"
+    販売_ガバナンス:
+      project_key: ""
+      parent_issue_key: ""
+      label: "ガバナンス"
+# --- Google Calendar 設定 ---
+google_calendar:
+  credentials_file: "config/google_credentials.json"  # OAuthクレデンシャルJSON
+  calendar_ids:
+    - "primary"                             # メインカレンダー（追加カレンダーはIDを追加）
+
+# --- Claude API 設定（要約機能） ---
+# 組織管理者から権限が付与されている場合のみ使用
+# 未設定の場合はルールベースの要約にフォールバック
+claude:
+  api_key: ""                               # AnthropicダッシュボードからAPIキーを取得
+  enabled: false                            # trueにするとAI要約を使用
+  model: "claude-sonnet-4-6"
+
+# --- レポート設定 ---
+report:
+  # 対象期間（月曜〜金曜の1週間）
+  lookback_days: 7
+  # 出力先ディレクトリ
+  output_dir: "output"
+  # Backlogへの自動転記（falseにするとローカル出力のみ）
+  auto_post_to_backlog: true
+  # ドライラン（trueにするとBacklogへの書き込みをスキップ）
+  dry_run: false
+
+# --- スケジューラー設定 ---
+schedule:
+  # 毎週金曜 18:00 に実行
+  day_of_week: "friday"
+  hour: 18
+  minute: 0
+
+# --- ナレッジベース設定 ---
+knowledge_base:
+  enabled: true
+  output_dir: "output/knowledge"     # チケット別・Slack別Markdownの出力先
+
+# --- 未対応チケット警告設定 ---
+ticket_alert:
+  enabled: true
+  stale_business_days: 3             # 何営業日更新がなければ警告するか
+  run_hour: 9
+  run_minute: 0
+
+# --- 日次夕方サマリー設定 ---
+daily_summary:
+  enabled: true
+  run_hour: 17
+  run_minute: 30
+
+# --- Google Meet 議事録設定 ---
+google_meet:
+  enabled: true
+  # マイドライブ > Meet Recordings フォルダの Google Drive フォルダID
+  folder_id: "1dqz9mGm2eCrThWJBzuiee3TPBw1nOMXj"
+
+# --- Gemini API 設定（議事録要約機能） ---
+# Google AI Studio（https://aistudio.google.com）からAPIキーを取得して設定
+gemini:
+  api_key: "${GEMINI_API_KEY}"   # .env の GEMINI_API_KEY に設定
+  enabled: true                 # APIキー取得後に true に変更
+  model: "gemini-2.5-flash"
