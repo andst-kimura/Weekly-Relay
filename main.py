@@ -28,6 +28,7 @@ from src.ticket_alert import TicketAlert
 from src.daily_summary import DailySummary
 from src.google_docs_client import GoogleDocsClient
 from src.gemini_client import GeminiClient
+from src.cleanup import CleanupTool
 
 # ログ設定
 Path("output").mkdir(exist_ok=True)
@@ -332,6 +333,10 @@ def main():
         "--run-summary", action="store_true",
         help="日次夕方サマリーを今すぐ実行"
     )
+    parser.add_argument(
+        "--cleanup", action="store_true",
+        help="Weekly Relay が転記したコメント・課題を対話形式で削除する"
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -358,6 +363,19 @@ def main():
 
     if args.run_summary:
         run_daily_summary(config)
+        return
+
+    if args.cleanup:
+        cfg_backlog = config["backlog"]
+        backlog_client = BacklogClient(
+            base_url=cfg_backlog["base_url"],
+            api_key=cfg_backlog["api_key"],
+            my_user_id=cfg_backlog["my_user_id"],
+        )
+        CleanupTool(
+            client=backlog_client,
+            report_project_key=cfg_backlog["report_project_key"],
+        ).run()
         return
 
     # 即時実行

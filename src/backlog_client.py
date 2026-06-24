@@ -209,6 +209,16 @@ class BacklogClient:
         """課題にコメントを追加（進捗報告の転記先）"""
         return self._post(f"issues/{issue_id}/comments", {"content": content})
 
+    def delete_comment(self, issue_id_or_key: str, comment_id: int) -> dict:
+        """課題のコメントを削除する"""
+        url = f"{self.base_url}/api/v2/issues/{issue_id_or_key}/comments/{comment_id}"
+        return self._request_with_retry("DELETE", url, params={"apiKey": self.api_key}).json()
+
+    def delete_issue(self, issue_id_or_key: str) -> dict:
+        """課題を削除する"""
+        url = f"{self.base_url}/api/v2/issues/{issue_id_or_key}"
+        return self._request_with_retry("DELETE", url, params={"apiKey": self.api_key}).json()
+
     def create_issue(self, project_id: int, summary: str, description: str,
                      issue_type_id: int, priority_id: int = 3) -> dict:
         """新規課題を作成"""
