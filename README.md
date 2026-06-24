@@ -1,155 +1,252 @@
-# 週次進捗報告 自動化ツール セットアップガイド
+# Weekly Relay
+
+> Backlog / Slack / Google Meet 議事録を横断収集し、Gemini AI で要約・分類して Backlog 親課題へ自動転記する週次進捗報告 AI アシスタント
+
+---
 
 ## 概要
 
-Backlog・Slack・Googleカレンダーから自分の活動を毎週金曜18時に自動収集し、
-Backlogの進捗報告課題へ転記するツールです。
+Weekly Relay は、毎週の進捗報告に関わる以下の作業を自動化します。
 
 ```
 [毎週金曜 18:00]
-      ↓
-  Backlog API  →  自分が担当/作成/コメントした課題
-  Slack API    →  自分が参加する全チャンネルの発言
-  Google Cal   →  スケジュール・工数情報
-      ↓
-  レポート生成（Claude API or ルールベース）
-      ↓
-  Backlog SALES_TEAM プロジェクトへ転記
+
+  Backlog       → 自分が担当 / 作成 / コメントした課題
+  Slack         → 自分が参加した全チャンネルの発言
+  Google Cal    → 参加したミーティング一覧
+  Google Meet   → 参加した全 MTG の Gemini 議事録（添付ファイル経由）
+        ↓
+  Gemini 2.5 Flash による要約・親課題判別
+        ↓
+  Backlog 親課題へ =Status= / =NextAction= 形式でコメント転記
+        ↓
+  ナレッジベース（チケット / Slack / 議事録）を Markdown で蓄積
 ```
 
 ---
 
-## 1. 必要な環境
+## 機能一覧
+
+### 1. 週次進捗レポート自動転記
+
+週の活動データを収集し、Backlog の各親課題へコメントを投稿します。
+
+**転記フォーマット**
+
+```
+## Weekly Relay 週次進捗レポート YYYY/MM/DD〜YYYY/MM/DD
+
+=Status=
+・(MM/DD) 完了した対応内容を箇条書き
+
+=NextAction=
+・次のアクション・残課題を箇条書き
+
+---
+*このコメントは Weekly Relay により自動転記されました*
+```
+
+**親課題の判別ロジック（3段階）**
+
+| 優先度 | 方法 | 対象 |
+|--------|------|------|
+| ① | `config.yaml` の `channel_mapping` で明示指定 | Slack チャンネル → 親課題 |
+| ② | Backlog API で親課題チェーンを遡及（確定的） | Backlog 活動 → SALES_TEAM 親課題 |
+| ③ | Gemini AI で判別 | ①②未対応の Slack チャンネル |
+
+### 2. Google Meet 議事録の収集
+
+- **自分がオーナーの MTG**：Meet Recordings フォルダから取得
+- **参加した全 MTG**：カレンダーイベントの添付ファイルから取得
+- 内容が空の議事録（Gemini 未生成）は自動フィルタリング
+
+### 3. ナレッジベース自動生成
+
+週次レポートと同時に `output/knowledge/` 以下へ Markdown を蓄積します。
+
+| 種別 | 保存先 | 内容 |
+|------|--------|------|
+| チケット KB | `tickets/ISSUE-KEY.md` | 課題詳細・対応履歴 + Gemini 要約 |
+| Slack KB | `slack/YYYYWW_channel.md` | 週次発言・スレッド + Gemini 要約 |
+| 議事録 KB | `meetings/YYYYMMDD_タイトル.md` | 議事録全文 + Gemini 要約 |
+
+### 4. 未対応チケット警告（毎朝）
+
+設定した営業日数以上更新のないチケットを検出し、Slack DM で通知します。
+
+### 5. 日次夕方サマリー
+
+当日の Backlog 活動と Slack 発言を Gemini で自然文にまとめ、Slack DM で送信します。
+
+---
+
+## ファイル構成
+
+```
+Weekly-Relay/
+├── main.py                         # エントリーポイント・スケジューラー
+├── requirements.txt                # 依存パッケージ
+├── .env                            # APIキー類（要作成・Git管理外）
+├── config/
+│   ├── config.yaml                 # 全設定（要編集）
+│   ├── google_credentials.json     # Google OAuth クライアントキー（要配置）
+│   └── google_token.pickle         # 自動生成（初回認証後）
+├── src/
+│   ├── backlog_client.py           # Backlog REST API v2 クライアント
+│   ├── backlog_poster.py           # 親課題判別・コメント転記
+│   ├── slack_client.py             # Slack SDK クライアント
+│   ├── google_calendar_client.py   # Google Calendar API クライアント
+│   ├── google_docs_client.py       # Google Drive / Docs API クライアント
+│   ├── gemini_client.py            # Gemini API クライアント（要約・判別）
+│   ├── report_generator.py         # レポート生成（Gemini / ルールベース）
+│   ├── knowledge_base.py           # ナレッジベース生成
+│   ├── ticket_alert.py             # 未対応チケット警告
+│   └── daily_summary.py            # 日次夕方サマリー
+├── tests/                          # pytest テスト（41件）
+├── docs/
+│   └── requirements_v2.md          # 詳細要件定義
+└── output/                         # 生成物（Git管理外）
+    ├── weekly_report_YYYYMMDD.md
+    ├── run.log
+    └── knowledge/
+        ├── tickets/
+        ├── slack/
+        └── meetings/
+```
+
+---
+
+## セットアップ
+
+### 1. 必要な環境
 
 - Python 3.11 以上
-- pip
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
+### 2. `.env` ファイルの作成
 
-## 2. 各サービスの事前準備
+`.env.example` をコピーして `.env` を作成し、各 API キーを設定します。
 
-### 2-1. Backlog APIキー取得
+```bash
+cp .env.example .env
+```
 
-1. Backlogにログイン
-2. **個人設定** > **API** > 「新しいAPIキーを発行する」
-3. 発行されたキーを `config/config.yaml` の `backlog.api_key` に設定
+```env
+BACKLOG_API_KEY=xxxxxxxxxxxxxxxxxxxx
+SLACK_BOT_TOKEN=xoxb-xxxxxxxxxx-xxxxxxxxxx-xxxxxxxxxxxxxxxx
+GEMINI_API_KEY=AIzaSy...
+```
 
-### 2-2. 自分のBacklogユーザーIDを確認
+### 3. Backlog の設定
 
-APIキー設定後、以下のコマンドで自分のIDを確認できます：
+**API キー取得**
+1. Backlog にログイン
+2. **個人設定** → **API** → 「新しいAPIキーを発行する」
+
+**自分のユーザー ID 確認**
 
 ```bash
 python main.py --check-user-id
 ```
 
-表示されたIDを `config/config.yaml` の `backlog.my_user_id` に設定してください。
+### 4. Slack App の設定
 
----
+1. https://api.slack.com/apps で「Create New App」
+2. **OAuth & Permissions** → Bot Token Scopes に以下を追加：
 
-### 2-3. Slack App の作成とトークン取得
+| スコープ | 用途 |
+|----------|------|
+| `channels:history` | パブリックチャンネルのメッセージ取得 |
+| `channels:read` | チャンネル一覧の取得 |
+| `groups:history` | プライベートチャンネルのメッセージ取得 |
+| `groups:read` | プライベートチャンネル一覧 |
+| `users:read` | ユーザー情報の取得 |
+| `im:write` | DM 送信（日次サマリー用） |
+| `chat:write` | メッセージ送信 |
 
-1. https://api.slack.com/apps にアクセス
-2. **「Create New App」** > **「From scratch」** を選択
-3. App Name: 任意（例: `Weekly Report Bot`）、Workspace: 自分のワークスペース
-4. 左メニュー **「OAuth & Permissions」** を開く
-5. **「Bot Token Scopes」** に以下のスコープを追加：
+3. ワークスペースにインストールし、Bot Token (`xoxb-...`) を `.env` に設定
+4. プライベートチャンネルには `/invite @ボット名` で招待
 
-   | スコープ | 用途 |
-   |---|---|
-   | `channels:history` | パブリックチャンネルのメッセージ取得 |
-   | `channels:read` | チャンネル一覧の取得 |
-   | `groups:history` | プライベートチャンネルのメッセージ取得 |
-   | `groups:read` | プライベートチャンネル一覧 |
-   | `users:read` | ユーザー情報の取得 |
+**自分の Slack User ID 確認**：Slack プロフィール → 「…」→「メンバー ID をコピー」
 
-6. **「Install to Workspace」** でインストール
-7. 生成された **「Bot User OAuth Token」** (`xoxb-...`) を `config/config.yaml` の `slack.bot_token` に設定
+### 5. Google API の設定
 
-### 2-4. 自分のSlack User IDを確認
+1. https://console.cloud.google.com でプロジェクトを作成
+2. 以下の API を有効化：
+   - Google Calendar API
+   - Google Drive API
+   - Google Docs API
+3. **認証情報** → **OAuth クライアント ID** → アプリの種類：**デスクトップアプリ**
+4. ダウンロードした JSON を `config/google_credentials.json` に保存
+5. 初回実行時にブラウザで Google 認証 → `google_token.pickle` が自動生成
 
-1. Slackアプリを開く
-2. 自分のプロフィールを開く
-3. **「…」（その他）** > **「メンバーIDをコピー」** を選択
-4. `UXXXXXXXXX` の形式のIDを `config/config.yaml` の `slack.my_user_id` に設定
+### 6. Gemini API の設定
 
-> ⚠️ **Botをチャンネルに招待する必要があります**  
-> プライベートチャンネルは `/invite @Weekly Report Bot` で招待してください。
+1. https://aistudio.google.com/app/apikey で API キーを取得
+2. `.env` の `GEMINI_API_KEY` に設定
+3. `config/config.yaml` で `gemini.enabled: true` を確認
 
----
-
-### 2-5. Google Calendar 認証設定
-
-1. https://console.cloud.google.com にアクセス
-2. 新規プロジェクト作成（または既存プロジェクトを選択）
-3. **「APIとサービス」** > **「ライブラリ」** > 「Google Calendar API」を有効化
-4. **「APIとサービス」** > **「認証情報」** > **「認証情報を作成」** > **「OAuthクライアントID」**
-5. アプリケーションの種類: **「デスクトップアプリ」** を選択
-6. ダウンロードしたJSONファイルを `config/google_credentials.json` として保存
-
-> 初回実行時にブラウザが開いてGoogleログイン画面が表示されます。  
-> 認証後、`config/google_token.pickle` が自動生成され、次回以降は自動認証されます。
-
----
-
-### 2-6. Claude API（任意・AI要約機能）
-
-> **組織管理者から権限が付与されている場合のみ設定してください。**  
-> 未設定の場合はルールベースの要約が自動的に使われます。
-
-1. https://console.anthropic.com にアクセス
-2. **「API Keys」** から新しいキーを発行
-3. `config/config.yaml` に設定：
-
-```yaml
-claude:
-  api_key: "sk-ant-api03-..."
-  enabled: true
-```
-
----
-
-## 3. 設定ファイルの記載例
+### 7. `config/config.yaml` の編集
 
 ```yaml
 backlog:
-  base_url: "https://adastria.backlog.jp"
-  api_key: "xxxxxxxxxxxxxxxxxxxx"
-  my_user_id: 123456
-  report_project_key: "SALES_TEAM"
+  base_url: "https://yourcompany.backlog.jp"
+  api_key: "${BACKLOG_API_KEY}"
+  my_user_id: 123456                    # --check-user-id で確認
+  report_project_key: "SALES_TEAM"      # 転記先プロジェクト
 
 slack:
-  bot_token: "xoxb-xxxxxxxxxx-xxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxx"
+  bot_token: "${SLACK_BOT_TOKEN}"
   my_user_id: "U01ABCDEFGH"
+  channel_mapping:                       # Slack チャンネル → 親課題の明示マッピング
+    販売チーム_hblab:
+      parent_issue_key: "SALES_TEAM-27"
+      label: "販売チーム HBLab"
+      project_key: "HBLAB"
 
 google_calendar:
   credentials_file: "config/google_credentials.json"
   calendar_ids:
     - "primary"
 
-claude:
-  api_key: ""          # 未設定でもOK（ルールベース要約を使用）
-  enabled: false
+google_meet:
+  enabled: true
+  folder_id: "GoogleDriveのMeet RecordingsフォルダID"
+
+gemini:
+  enabled: true
+  model: "gemini-2.5-flash"
+  api_key: "${GEMINI_API_KEY}"
 
 report:
   output_dir: "output"
   auto_post_to_backlog: true
-  dry_run: false       # trueにするとBacklogへの書き込みをスキップ
+  dry_run: false                         # true でBacklog書き込みをスキップ
 
-schedule:
-  day_of_week: "friday"
-  hour: 18
-  minute: 0
+knowledge_base:
+  enabled: true
+  output_dir: "output/knowledge"
+
+ticket_alert:
+  enabled: true
+  stale_business_days: 3                 # N営業日更新なしで警告
+  run_hour: 9
+  run_minute: 0
+
+daily_summary:
+  enabled: true
+  run_hour: 17
+  run_minute: 30
 ```
 
 ---
 
-## 4. 実行方法
+## 実行方法
 
-### 動作確認（Backlog書き込みなし）
+### 動作確認（Backlog への書き込みなし）
 
 ```bash
 python main.py --run-now --dry-run
@@ -161,123 +258,62 @@ python main.py --run-now --dry-run
 python main.py --run-now
 ```
 
-### スケジューラー起動（毎週金曜18時に自動実行）
+### スケジューラー起動（毎週金曜 18:00 に自動実行）
 
 ```bash
 python main.py
 ```
 
-> サーバーやクラウドで常時起動させる場合は後述の「本番運用」を参照
-
----
-
-## 5. 出力例
-
-### ローカルファイル（output/weekly_report_20250620.md）
-
-```markdown
-## 週次進捗報告 2025/06/16〜2025/06/20
-
----
-
-### 📋 Backlog 対応状況
-
-**【EC推進プロジェクト】**
-- ECPROJ-123 商品マスタ更新対応（処理中）
-  - コメント: 商品コードの重複チェックロジックを修正しました...
-
-**【SALES_TEAM】**
-- SALES-45 週次KPIレポート作成（完了）
-
-### 💬 Slack コミュニケーション
-
-**#ec-project**（5件の発言）
-  - 商品マスタの件、確認しました。明日中に対応します...
-  - （他 2 件）
-
-### 📅 工数サマリー（Googleカレンダーより）
-
-**週間合計工数: 32.5時間**
-
-**06/16(Mon)** (8.0h)
-  - 週次定例MTG（1.0h）
-  - EC案件打ち合わせ（1.5h）
-  ...
-```
-
-### Backlogへの転記
-
-- 親課題が存在する場合 → 該当する親課題にコメント追加
-- 親課題がない場合 → `週次活動報告 2025/06/20` として新規起票
-
----
-
-## 6. 本番運用（常時起動）
-
-### GitHub Actions を使う場合（無料・推奨）
-
-`.github/workflows/weekly_report.yml` を作成：
-
-```yaml
-name: Weekly Report
-on:
-  schedule:
-    - cron: '0 9 * * 5'  # 毎週金曜 18:00 JST (UTC 09:00)
-  workflow_dispatch:      # 手動実行も可能
-
-jobs:
-  report:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -r requirements.txt
-      - run: python main.py --run-now
-        env:
-          BACKLOG_API_KEY: ${{ secrets.BACKLOG_API_KEY }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          # Google認証はサービスアカウントキーをSecretに保存
-```
-
-### cron を使う場合（ローカルサーバー）
+### 未対応チケット警告のみ実行
 
 ```bash
-# crontab -e で以下を追加
-0 18 * * 5 cd /path/to/weekly_report && python main.py --run-now >> output/cron.log 2>&1
+python main.py --run-alert
+```
+
+### 日次サマリーのみ実行
+
+```bash
+python main.py --run-summary
+```
+
+### 自分の Backlog ユーザー ID 確認
+
+```bash
+python main.py --check-user-id
 ```
 
 ---
 
-## 7. トラブルシューティング
+## コマンドライン引数一覧
+
+| 引数 | 説明 |
+|------|------|
+| `--run-now` | スケジューラーを待たず今すぐ週次レポートを実行 |
+| `--dry-run` | Backlog への書き込みをスキップして動作確認 |
+| `--run-alert` | 未対応チケット警告を今すぐ実行 |
+| `--run-summary` | 日次夕方サマリーを今すぐ実行 |
+| `--check-user-id` | Backlog の自分のユーザー ID を確認して終了 |
+| `--config PATH` | 設定ファイルのパスを指定（デフォルト: `config/config.yaml`） |
+
+---
+
+## トラブルシューティング
 
 | エラー | 原因 | 対処 |
-|---|---|---|
-| `401 Unauthorized` | APIキーが無効 | Backlog/Slack のキーを再確認 |
-| `not_in_channel` | BotがSlackチャンネルに未参加 | `/invite @Bot名` で招待 |
-| Google認証エラー | credentials.jsonが古い | Google Consoleで再発行 |
-| Claude APIエラー | 権限なし/残高不足 | `claude.enabled: false` にしてルールベースで動作 |
+|--------|------|------|
+| `401 Unauthorized` | Backlog API キーが無効 | キーを再発行して `.env` を更新 |
+| `not_in_channel` | Bot が Slack チャンネルに未参加 | `/invite @ボット名` で招待 |
+| `403 insufficientPermissions` | Google トークンのスコープ不足 | `google_token.pickle` を削除して再認証 |
+| `403 accessNotConfigured` | Drive / Docs API が未有効 | Google Cloud Console でAPIを有効化 |
+| `403 The caller does not have permission` | 議事録ドキュメントの閲覧権限なし | 正常動作（権限なし議事録はスキップ） |
+| Gemini 判別の誤分類 | 関連性が低い内容が混入 | `channel_mapping` で明示マッピングを追加 |
 
 ---
 
-## 8. ファイル構成
+## テスト
 
+```bash
+python -m pytest tests/ -v
 ```
-weekly_report/
-├── main.py                        # エントリーポイント
-├── requirements.txt               # 依存パッケージ
-├── config/
-│   ├── config.yaml                # 設定ファイル（要編集）
-│   ├── google_credentials.json    # Google OAuthキー（要配置）
-│   └── google_token.pickle        # 自動生成（初回認証後）
-├── src/
-│   ├── backlog_client.py          # Backlog APIクライアント
-│   ├── slack_client.py            # Slack APIクライアント
-│   ├── google_calendar_client.py  # Google Calendar APIクライアント
-│   ├── report_generator.py        # レポート生成（AI/ルールベース）
-│   └── backlog_poster.py          # Backlog転記処理
-└── output/
-    ├── weekly_report_YYYYMMDD.md  # 自動生成レポート
-    └── run.log                    # 実行ログ
-```
+
+41 件のテストがすべてパスすることを確認しています。
