@@ -10,6 +10,11 @@ __pycache__/
 .venv/
 venv/
 
-# 出力ファイル
-output/*.md
-output/*.log
+# 出力ファイル（ツール生成物はすべて除外）
+output/
+
+# Claude Code ローカル設定
+.claude/
+
+# 作業メモ
+作業メモ
