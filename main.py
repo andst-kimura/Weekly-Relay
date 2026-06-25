@@ -44,6 +44,18 @@ _stream_handler.setFormatter(_log_formatter)
 logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
 logger = logging.getLogger(__name__)
 
+# Google SDK / httpx / gRPC / absl の冗長ログを抑制
+for _noisy in ("httpx", "httpcore", "google.generativeai", "google.ai.generativelanguage",
+               "google.ai", "google.auth", "google.auth.transport",
+               "grpc", "grpc._channel", "absl"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+# absl-py は独自ロギングを持つため個別に抑制
+try:
+    import absl.logging as _absl_log
+    _absl_log.set_verbosity(_absl_log.WARNING)
+except ImportError:
+    pass
+
 
 def is_business_day(dt: datetime = None) -> bool:
     """今日が営業日かどうか判定（土日・祝日を除く）"""

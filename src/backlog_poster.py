@@ -118,6 +118,41 @@ class BacklogPoster:
             slack_by_channel[msg["channel_name"]].append(msg)
 
         # ------------------------------------------------------------------ #
+        # 事前処理: 全親課題リストを収集し議事録を一括分類
+        # Gemini 呼び出しを M×N → M 回（docs 数）に削減
+        # ------------------------------------------------------------------ #
+        self._doc_classify_cache: dict[str, str | None] = {}
+        _raw_parents_cache: list[dict] = []  # ③ で使い回す
+
+        if gemini_client and gemini_client.enabled and valid_meeting_docs:
+            all_parent_issues: list[dict] = []
+
+            # channel_mapping の親課題を収集
+            for m in self.channel_mapping.values():
+                pk = m.get("parent_issue_key", "")
+                if pk and not any(x["issue_key"] == pk for x in all_parent_issues):
+                    all_parent_issues.append({"issue_key": pk, "summary": ""})
+
+            # SALES_TEAM 全親課題（③ Gemini 判別でも使い回す）
+            try:
+                _raw_parents_cache = self.client.get_parent_issues(
+                    self.report_project_key, exclude_statuses=CLOSED_STATUSES
+                )
+                for p in _raw_parents_cache:
+                    pk = p.get("issueKey", "")
+                    if pk and not any(x["issue_key"] == pk for x in all_parent_issues):
+                        all_parent_issues.append(
+                            {"issue_key": pk, "summary": p.get("summary", "")}
+                        )
+            except Exception as e:
+                logger.warning(f"親課題一覧取得失敗（事前分類スキップ）: {e}")
+
+            if all_parent_issues:
+                self._precompute_doc_classification(
+                    valid_meeting_docs, all_parent_issues, gemini_client
+                )
+
+        # ------------------------------------------------------------------ #
         # ① channel_mapping で明示指定された親課題に転記
         # ------------------------------------------------------------------ #
         for channel, mapping in self.channel_mapping.items():
@@ -224,6 +259,7 @@ class BacklogPoster:
                 generator=generator,
                 gemini_client=gemini_client,
                 already_posted=posted_issue_keys,
+                raw_parents_cache=_raw_parents_cache,
             )
 
         # ------------------------------------------------------------------ #
@@ -278,7 +314,39 @@ class BacklogPoster:
         return None
 
     # ------------------------------------------------------------------ #
-    #  議事録を親課題ごとに個別分類（Gemini）
+    #  議事録の事前一括分類（Gemini 呼び出し M×N → M に削減）
+    # ------------------------------------------------------------------ #
+
+    def _precompute_doc_classification(
+        self,
+        meeting_docs: list[dict],
+        all_parent_issues: list[dict],
+        gemini_client,
+    ) -> None:
+        """
+        全議事録を全親課題リストに対して一度に分類し、
+        self._doc_classify_cache に結果を格納する。
+        Gemini 呼び出しは docs 数分（M 回）のみ。
+        """
+        logger.info(
+            f"議事録事前分類開始: {len(meeting_docs)} 件 × {len(all_parent_issues)} 親課題"
+        )
+        for doc in meeting_docs:
+            doc_key = doc.get("id") or doc["title"]
+            date_str = doc["created_date"].strftime("%Y/%m/%d")
+            excerpt = (doc.get("text") or "")[:500].replace("\n", " ")
+            content = (
+                f"議事録タイトル: {doc['title']}\n"
+                f"日時: {date_str}\n"
+                f"内容: {excerpt}"
+            )
+            matched = gemini_client.detect_parent_issue(content, all_parent_issues)
+            self._doc_classify_cache[doc_key] = matched
+            logger.debug(f"議事録事前分類: {doc['title']} → {matched}")
+        logger.info(f"議事録事前分類完了: {len(meeting_docs)} 件")
+
+    # ------------------------------------------------------------------ #
+    #  議事録を親課題ごとにフィルタ（キャッシュ参照）
     # ------------------------------------------------------------------ #
 
     def _classify_docs_for_issue(
@@ -289,11 +357,21 @@ class BacklogPoster:
         gemini_client,
     ) -> list[dict]:
         """
-        各議事録ドキュメントを個別に Gemini で分類し、
-        指定した親課題に関連するものだけを返す。
-        Gemini が無効の場合は全件返す（従来動作）。
+        事前分類キャッシュがあればそれを参照（Gemini 呼び出しなし）。
+        キャッシュ未構築の場合は従来のM×N方式にフォールバック。
         """
-        if not gemini_client or not gemini_client.enabled or not meeting_docs:
+        if not meeting_docs:
+            return []
+
+        # キャッシュが構築済みであれば参照のみ
+        if self._doc_classify_cache:
+            return [
+                doc for doc in meeting_docs
+                if self._doc_classify_cache.get(doc.get("id") or doc["title"]) == issue_key
+            ]
+
+        # Gemini 無効 or キャッシュ未構築: 従来方式
+        if not gemini_client or not gemini_client.enabled:
             return meeting_docs
 
         related = []
@@ -309,8 +387,6 @@ class BacklogPoster:
             matched = gemini_client.detect_parent_issue(content, parent_issues)
             if matched == issue_key:
                 related.append(doc)
-            else:
-                logger.debug(f"議事録スキップ（{issue_key}と無関係）: {doc['title']}")
         return related
 
     # ------------------------------------------------------------------ #
@@ -325,18 +401,23 @@ class BacklogPoster:
         generator,
         gemini_client,
         already_posted: set,
+        raw_parents_cache: list[dict] = None,
     ) -> list[dict]:
         """
         channel_mapping 未登録の Slack チャンネルを Gemini で分類して転記する。
         Backlog 活動は ② で確定的に処理済みのためここでは対象外。
+        raw_parents_cache: 事前取得済みの親課題リスト（None の場合は API 再取得）
         """
-        try:
-            raw_parents = self.client.get_parent_issues(
-                self.report_project_key, exclude_statuses=CLOSED_STATUSES
-            )
-        except Exception as e:
-            logger.warning(f"親課題一覧の取得失敗（Gemini判別をスキップ）: {e}")
-            return []
+        if raw_parents_cache is not None:
+            raw_parents = raw_parents_cache
+        else:
+            try:
+                raw_parents = self.client.get_parent_issues(
+                    self.report_project_key, exclude_statuses=CLOSED_STATUSES
+                )
+            except Exception as e:
+                logger.warning(f"親課題一覧の取得失敗（Gemini判別をスキップ）: {e}")
+                return []
 
         parent_issues_for_gemini = [
             {"issue_key": p.get("issueKey", ""), "summary": p.get("summary", "")}

@@ -16,7 +16,9 @@ from src.slack_client import SlackClient
 logger = logging.getLogger(__name__)
 
 JST = timezone(timedelta(hours=9))
-_TICKET_WORKERS = 5  # Backlog API の並列数（レート制限を考慮して控えめに設定）
+_TICKET_WORKERS = 5   # Backlog API の並列数
+_MEETING_WORKERS = 5  # 議事録 KB（ドキュメント取得済みのため並列安全）
+_SLACK_WORKERS = 3    # Slack KB（API 呼び出しあり、レート制限を考慮して控えめ）
 
 
 class KnowledgeBase:
@@ -138,15 +140,21 @@ class KnowledgeBase:
         week_label = f"{since.strftime('%Y年')}第{iso_week}週"
 
         channels = self.slack.get_my_channels()
-        for channel in channels:
-            channel_id = channel["id"]
-            channel_name = channel.get("name", channel_id)
-            try:
-                self._save_slack_channel(
-                    channel_id, channel_name, since, until, week_num, week_label
-                )
-            except Exception as e:
-                logger.warning(f"Slack KB生成失敗 #{channel_name}: {e}")
+
+        def _save(channel):
+            self._save_slack_channel(
+                channel["id"], channel.get("name", channel["id"]),
+                since, until, week_num, week_label,
+            )
+
+        with ThreadPoolExecutor(max_workers=_SLACK_WORKERS) as executor:
+            futures = {executor.submit(_save, ch): ch.get("name", ch["id"]) for ch in channels}
+            for future in as_completed(futures):
+                ch_name = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.warning(f"Slack KB生成失敗 #{ch_name}: {e}")
 
     def _save_slack_channel(self, channel_id: str, channel_name: str,
                              since: datetime, until: datetime,
@@ -235,11 +243,14 @@ class KnowledgeBase:
     # ------------------------------------------------------------------ #
 
     def _generate_meeting_knowledge(self, meeting_docs: list[dict]) -> None:
-        for doc in meeting_docs:
-            try:
-                self._save_meeting(doc)
-            except Exception as e:
-                logger.warning(f"議事録KB生成失敗 ({doc.get('title', '')}): {e}")
+        with ThreadPoolExecutor(max_workers=_MEETING_WORKERS) as executor:
+            futures = {executor.submit(self._save_meeting, doc): doc.get("title", "") for doc in meeting_docs}
+            for future in as_completed(futures):
+                title = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.warning(f"議事録KB生成失敗 ({title}): {e}")
 
     def _save_meeting(self, doc: dict) -> None:
         date_str = doc["created_date"].strftime("%Y%m%d")
