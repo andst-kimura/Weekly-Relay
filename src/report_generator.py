@@ -2,9 +2,12 @@
 レポート生成モジュール
 Gemini API が使えない場合はルールベースの要約にフォールバック
 """
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from collections import defaultdict
 import logging
+
+_SUMMARY_WORKERS = 10  # 議事録要約の並列数
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,30 @@ class ReportGenerator:
     # ------------------------------------------------------------------ #
     #  Backlog転記用テキスト生成
     # ------------------------------------------------------------------ #
+
+    def pre_summarize_meetings(self, meeting_docs: list[dict], gemini_client) -> None:
+        """議事録要約を並列実行し、各 doc の _summary キーに格納する。"""
+        if not meeting_docs or not gemini_client or not gemini_client.enabled:
+            return
+        targets = [d for d in meeting_docs if d.get("text") and "_summary" not in d]
+        if not targets:
+            return
+        logger.info(f"議事録要約 並列開始: {len(targets)} 件 (workers={_SUMMARY_WORKERS})")
+
+        def _summarize(doc):
+            return doc, gemini_client.summarize_meeting(doc["text"])
+
+        with ThreadPoolExecutor(max_workers=_SUMMARY_WORKERS) as executor:
+            futures = {executor.submit(_summarize, d): d for d in targets}
+            for future in as_completed(futures):
+                try:
+                    doc, summary = future.result()
+                    doc["_summary"] = summary or ""
+                except Exception as e:
+                    doc = futures[future]
+                    logger.warning(f"議事録要約失敗 ({doc.get('title', '?')}): {e}")
+                    doc["_summary"] = ""
+        logger.info("議事録要約 並列完了")
 
     def build_backlog_comment(self, aggregated: dict,
                                meeting_docs: list[dict] = None,
@@ -154,13 +181,12 @@ class ReportGenerator:
             for doc in meeting_docs:
                 date_str = doc["created_date"].strftime("%Y/%m/%d")
                 lines.append(f"**{doc['title']}**（{date_str}）")
-                if gemini_client and gemini_client.enabled and doc.get("text"):
+                # _summary は pre_summarize_meetings() で並列計算済み
+                summary = doc.get("_summary")
+                if summary is None and gemini_client and gemini_client.enabled and doc.get("text"):
                     summary = gemini_client.summarize_meeting(doc["text"])
-                    if summary:
-                        lines.append(summary)
-                    else:
-                        excerpt = doc["text"][:200].replace("\n", " ")
-                        lines.append(excerpt + ("…" if len(doc["text"]) > 200 else ""))
+                if summary:
+                    lines.append(summary)
                 else:
                     excerpt = doc.get("text", "")[:200].replace("\n", " ")
                     if excerpt:
@@ -263,13 +289,12 @@ class ReportGenerator:
             for doc in meeting_docs:
                 date_str = doc["created_date"].strftime("%Y/%m/%d")
                 lines.append(f"**{doc['title']}**（{date_str}）")
-                if gemini_client and gemini_client.enabled and doc.get("text"):
+                # _summary は pre_summarize_meetings() で並列計算済み
+                summary = doc.get("_summary")
+                if summary is None and gemini_client and gemini_client.enabled and doc.get("text"):
                     summary = gemini_client.summarize_meeting(doc["text"])
-                    if summary:
-                        lines.append(summary)
-                    else:
-                        excerpt = doc["text"][:200].replace("\n", " ")
-                        lines.append(excerpt + ("…" if len(doc["text"]) > 200 else ""))
+                if summary:
+                    lines.append(summary)
                 else:
                     excerpt = doc.get("text", "")[:200].replace("\n", " ")
                     if excerpt:
