@@ -3,6 +3,7 @@ Backlog API クライアント
 自分が関わった課題・コメント・操作履歴を取得する
 """
 import requests
+from requests.adapters import HTTPAdapter
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -21,6 +22,10 @@ class BacklogClient:
         self.api_key = api_key
         self.my_user_id = my_user_id
         self.session = requests.Session()
+        # KB生成時に workers=8 × 2内部スレッド = 最大16接続を張るため上限を引き上げる
+        adapter = HTTPAdapter(pool_maxsize=20, pool_connections=4)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
         """レートリミット・一時エラー時にリトライするリクエスト共通処理"""
