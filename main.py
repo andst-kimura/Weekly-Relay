@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
 
 # Google SDK / httpx / gRPC / absl の冗長ログを抑制
 # "AFC is enabled" は google 親ロガー配下から出るため google 全体を WARNING に設定
-for _noisy in ("httpx", "httpcore", "google", "grpc", "grpc._channel", "absl"):
+for _noisy in ("httpx", "httpcore", "google", "grpc", "grpc._channel", "absl",
+               "googleapiclient.discovery_cache"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 # absl-py は独自ロギングを持つため個別に抑制
 try:
@@ -378,10 +379,6 @@ def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> Non
                          my_user_id=cfg_slack["my_user_id"])
         msgs = sc.get_all_my_messages(week_start, week_end)
         logger.info(f"✅ Slack: {len(msgs)} 件取得 ({_time.monotonic()-t:.1f}s)")
-        for m in msgs[:5]:
-            logger.info(f"  #{m.get('channel_name','?')} {str(m.get('text',''))[:60]}")
-        if len(msgs) > 5:
-            logger.info(f"  ... 他 {len(msgs)-5} 件")
         return
 
     # ---------- Calendar / 議事録 ----------
@@ -458,9 +455,7 @@ def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> Non
         aggregated = generator.aggregate(acts, msgs, events, week_start, week_end)
         comment = generator.build_backlog_comment(
             aggregated, meeting_docs=meeting_docs, gemini_client=gemini)
-        logger.info("✅ レポート生成完了（Backlog転記はスキップ）\n" + "─" * 40)
-        logger.info(comment)
-        logger.info("─" * 40)
+        logger.info(f"✅ レポート生成完了（{len(comment)} 文字、Backlog転記はスキップ）")
         return
 
     # ---------- KB（ナレッジベース生成のみ）----------
