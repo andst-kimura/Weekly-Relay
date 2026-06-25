@@ -45,9 +45,8 @@ logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler
 logger = logging.getLogger(__name__)
 
 # Google SDK / httpx / gRPC / absl の冗長ログを抑制
-for _noisy in ("httpx", "httpcore", "google.generativeai", "google.ai.generativelanguage",
-               "google.ai", "google.auth", "google.auth.transport",
-               "grpc", "grpc._channel", "absl"):
+# "AFC is enabled" は google 親ロガー配下から出るため google 全体を WARNING に設定
+for _noisy in ("httpx", "httpcore", "google", "grpc", "grpc._channel", "absl"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 # absl-py は独自ロギングを持つため個別に抑制
 try:
@@ -335,6 +334,180 @@ def run_daily_summary(config: dict) -> None:
     logger.info("=" * 60)
 
 
+_ONLY_CHOICES = ["backlog", "slack", "calendar", "firestore", "report", "kb"]
+
+
+def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> None:
+    """--only モード: 特定機能のみ実行して動作確認する"""
+    import time as _time
+
+    week_start, week_end = get_week_range(reference_dt)
+    cfg_backlog = config["backlog"]
+    cfg_slack = config["slack"]
+    cfg_cal = config["google_calendar"]
+    cfg_meet = config.get("google_meet", {})
+    cfg_gemini = config.get("gemini", {})
+    cfg_fs = config.get("firestore", {})
+
+    logger.info("=" * 60)
+    logger.info(f"[DRY-RUN: --only {only}]  対象期間: {week_start} 〜 {week_end}")
+    logger.info("=" * 60)
+
+    # ---------- Backlog ----------
+    if only == "backlog":
+        t = _time.monotonic()
+        bc = BacklogClient(base_url=cfg_backlog["base_url"],
+                           api_key=cfg_backlog["api_key"],
+                           my_user_id=cfg_backlog["my_user_id"])
+        acts = bc.get_all_my_activities(
+            week_start, week_end,
+            cfg_backlog.get("target_projects"),
+            cfg_backlog.get("exclude_projects"),
+        )
+        logger.info(f"✅ Backlog: {len(acts)} 件取得 ({_time.monotonic()-t:.1f}s)")
+        for a in acts[:10]:
+            logger.info(f"  [{a['type']}] {a['issue_key']} {a['summary'][:50]}")
+        if len(acts) > 10:
+            logger.info(f"  ... 他 {len(acts)-10} 件")
+        return
+
+    # ---------- Slack ----------
+    if only == "slack":
+        t = _time.monotonic()
+        sc = SlackClient(bot_token=cfg_slack["bot_token"],
+                         my_user_id=cfg_slack["my_user_id"])
+        msgs = sc.get_all_my_messages(week_start, week_end)
+        logger.info(f"✅ Slack: {len(msgs)} 件取得 ({_time.monotonic()-t:.1f}s)")
+        for m in msgs[:5]:
+            logger.info(f"  #{m.get('channel_name','?')} {str(m.get('text',''))[:60]}")
+        if len(msgs) > 5:
+            logger.info(f"  ... 他 {len(msgs)-5} 件")
+        return
+
+    # ---------- Calendar / 議事録 ----------
+    if only == "calendar":
+        t = _time.monotonic()
+        cal = GoogleCalendarClient(credentials_file=cfg_cal["credentials_file"],
+                                    calendar_ids=cfg_cal["calendar_ids"])
+        events = cal.get_events(week_start, week_end)
+        logger.info(f"✅ Calendar: {len(events)} 件取得 ({_time.monotonic()-t:.1f}s)")
+        for ev in events:
+            logger.info(f"  {ev['start_dt'].strftime('%m/%d %H:%M')} {ev['summary']}")
+
+        if cfg_meet.get("enabled", False):
+            docs_client = GoogleDocsClient(credentials_file=cfg_cal["credentials_file"])
+            folder_docs = []
+            if cfg_meet.get("folder_id"):
+                folder_docs = docs_client.get_meeting_docs(
+                    folder_id=cfg_meet["folder_id"], since=week_start, until=week_end)
+            calendar_docs = docs_client.get_docs_from_events(events)
+            meeting_docs = docs_client.merge_docs(folder_docs, calendar_docs)
+            logger.info(f"✅ 議事録: {len(meeting_docs)} 件（重複排除済み）")
+            for d in meeting_docs:
+                logger.info(f"  {d['created_date'].strftime('%m/%d')} {d['title'][:50]}")
+        return
+
+    # ---------- Firestore ----------
+    if only == "firestore":
+        if not cfg_fs.get("enabled", False):
+            logger.warning("config の firestore.enabled が false です")
+            return
+        t = _time.monotonic()
+        try:
+            fs = FirestoreClient()
+            test_id = "__dry_run_test__"
+            fs.save_context_snapshot(test_id, {"ping": "pong", "source_type": "test"})
+            result = fs.get_context_snapshot(test_id)
+            if result and result.get("ping") == "pong":
+                logger.info(f"✅ Firestore: 書き込み・読み込み成功 ({_time.monotonic()-t:.1f}s)")
+            else:
+                logger.warning(f"⚠️ Firestore: 書き込みは成功したが読み込み結果が不正: {result}")
+        except Exception as e:
+            logger.error(f"❌ Firestore: 接続失敗 — {e}")
+        return
+
+    # ---------- Report（データ収集 + レポート生成のみ、Backlog転記なし）----------
+    if only == "report":
+        bc = BacklogClient(base_url=cfg_backlog["base_url"],
+                           api_key=cfg_backlog["api_key"],
+                           my_user_id=cfg_backlog["my_user_id"])
+        sc = SlackClient(bot_token=cfg_slack["bot_token"],
+                         my_user_id=cfg_slack["my_user_id"])
+        acts = bc.get_all_my_activities(week_start, week_end,
+                                         cfg_backlog.get("target_projects"),
+                                         cfg_backlog.get("exclude_projects"))
+        msgs = sc.get_all_my_messages(week_start, week_end)
+        cal = GoogleCalendarClient(credentials_file=cfg_cal["credentials_file"],
+                                    calendar_ids=cfg_cal["calendar_ids"])
+        events = cal.get_events(week_start, week_end)
+        meeting_docs = []
+        if cfg_meet.get("enabled", False):
+            docs_client = GoogleDocsClient(credentials_file=cfg_cal["credentials_file"])
+            folder_docs = []
+            if cfg_meet.get("folder_id"):
+                folder_docs = docs_client.get_meeting_docs(
+                    folder_id=cfg_meet["folder_id"], since=week_start, until=week_end)
+            calendar_docs = docs_client.get_docs_from_events(events)
+            meeting_docs = docs_client.merge_docs(folder_docs, calendar_docs)
+
+        gemini = GeminiClient(
+            api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
+            model=cfg_gemini.get("model", "gemini-2.0-flash"),
+        )
+        generator = ReportGenerator()
+        aggregated = generator.aggregate(acts, msgs, events, week_start, week_end)
+        comment = generator.build_backlog_comment(
+            aggregated, meeting_docs=meeting_docs, gemini_client=gemini)
+        logger.info("✅ レポート生成完了（Backlog転記はスキップ）\n" + "─" * 40)
+        logger.info(comment)
+        logger.info("─" * 40)
+        return
+
+    # ---------- KB（ナレッジベース生成のみ）----------
+    if only == "kb":
+        cfg_kb = config.get("knowledge_base", {})
+        if not cfg_kb.get("enabled", False):
+            logger.warning("config の knowledge_base.enabled が false です")
+            return
+        bc = BacklogClient(base_url=cfg_backlog["base_url"],
+                           api_key=cfg_backlog["api_key"],
+                           my_user_id=cfg_backlog["my_user_id"])
+        sc = SlackClient(bot_token=cfg_slack["bot_token"],
+                         my_user_id=cfg_slack["my_user_id"])
+        acts = bc.get_all_my_activities(week_start, week_end,
+                                         cfg_backlog.get("target_projects"),
+                                         cfg_backlog.get("exclude_projects"))
+        meeting_docs = []
+        if cfg_meet.get("enabled", False):
+            cal = GoogleCalendarClient(credentials_file=cfg_cal["credentials_file"],
+                                        calendar_ids=cfg_cal["calendar_ids"])
+            events = cal.get_events(week_start, week_end)
+            docs_client = GoogleDocsClient(credentials_file=cfg_cal["credentials_file"])
+            folder_docs = []
+            if cfg_meet.get("folder_id"):
+                folder_docs = docs_client.get_meeting_docs(
+                    folder_id=cfg_meet["folder_id"], since=week_start, until=week_end)
+            calendar_docs = docs_client.get_docs_from_events(events)
+            meeting_docs = docs_client.merge_docs(folder_docs, calendar_docs)
+
+        gemini = GeminiClient(
+            api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
+            model=cfg_gemini.get("model", "gemini-2.0-flash"),
+        )
+        fs = None
+        if cfg_fs.get("enabled", False):
+            try:
+                fs = FirestoreClient()
+            except Exception as e:
+                logger.warning(f"Firestore 初期化失敗: {e}")
+
+        kb = KnowledgeBase(backlog_client=bc, slack_client=sc,
+                           gemini_client=gemini, firestore_client=fs)
+        kb.generate(acts, week_start, week_end, meeting_docs=meeting_docs)
+        logger.info("✅ ナレッジベース生成完了")
+        return
+
+
 def main():
     parser = argparse.ArgumentParser(description="週次進捗報告 自動化ツール")
     parser.add_argument(
@@ -348,6 +521,10 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Backlogへの書き込みをスキップして動作確認"
+    )
+    parser.add_argument(
+        "--only", choices=_ONLY_CHOICES, metavar="|".join(_ONLY_CHOICES),
+        help="特定機能のみ実行: backlog / slack / calendar / firestore / report / kb"
     )
     parser.add_argument(
         "--check-user-id", action="store_true",
@@ -372,6 +549,10 @@ def main():
     if args.dry_run:
         config["report"]["dry_run"] = True
         logger.info("🔍 ドライランモード: Backlogへの書き込みはスキップされます")
+
+    if args.only:
+        run_only_mode(config, args.only)
+        return
 
     # ユーザーID確認モード
     if args.check_user_id:
