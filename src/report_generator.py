@@ -1,6 +1,6 @@
 """
 レポート生成モジュール
-Claude APIが使えない場合はルールベースの要約にフォールバック
+Gemini API が使えない場合はルールベースの要約にフォールバック
 """
 from datetime import datetime
 from collections import defaultdict
@@ -12,20 +12,8 @@ logger = logging.getLogger(__name__)
 class ReportGenerator:
     def __init__(self, claude_api_key: str = "", claude_enabled: bool = False,
                  claude_model: str = "claude-sonnet-4-6"):
-        self.claude_enabled = claude_enabled and bool(claude_api_key)
-        self.claude_api_key = claude_api_key
-        self.claude_model = claude_model
-
-        if self.claude_enabled:
-            try:
-                import anthropic
-                self.claude_client = anthropic.Anthropic(api_key=claude_api_key)
-                logger.info("Claude APIによる要約機能が有効です")
-            except ImportError:
-                logger.warning("anthropicパッケージが未インストール。ルールベース要約を使用します")
-                self.claude_enabled = False
-        else:
-            logger.info("ルールベースの要約を使用します（Claude API未設定）")
+        # Claude API パラメータは後方互換のため残すが使用しない（Gemini に移行済み）
+        pass
 
     # ------------------------------------------------------------------ #
     #  データ集約
@@ -183,79 +171,6 @@ class ReportGenerator:
         lines.append("*このコメントは Weekly Relay により自動転記されました*")
 
         return "\n".join(lines)
-
-    def build_backlog_comment_with_ai(self, aggregated: dict,
-                                       raw_backlog: list[dict],
-                                       raw_slack: list[dict]) -> str:
-        """Claude APIを使って自然な文体のレポートを生成"""
-        if not self.claude_enabled:
-            return self.build_backlog_comment(aggregated)
-
-        w_start = aggregated["week_start"].strftime("%Y/%m/%d")
-        w_end = aggregated["week_end"].strftime("%Y/%m/%d")
-
-        # AIへの入力データを整理
-        backlog_summary = []
-        for proj, issues in aggregated["backlog_by_project"].items():
-            for issue_label, activities in issues.items():
-                comments = [a.get("comment_content", "") for a in activities if a.get("comment_content")]
-                backlog_summary.append({
-                    "project": proj,
-                    "issue": issue_label,
-                    "types": [a["type"] for a in activities],
-                    "status": activities[0].get("status", ""),
-                    "comments": comments[:3],
-                })
-
-        slack_summary = []
-        for channel, msgs in aggregated["slack_by_channel"].items():
-            slack_summary.append({
-                "channel": channel,
-                "count": len(msgs),
-                "samples": [m["text"][:100] for m in msgs[:5]],
-            })
-
-        calendar_summary = [
-            {"event": e["summary"], "hours": e["duration_hours"],
-             "date": e["start_dt"].strftime("%m/%d")}
-            for e in aggregated["calendar_events"]
-        ]
-
-        prompt = f"""あなたはプロジェクトマネージャーのアシスタントです。
-以下の活動データを元に、Backlogの週次進捗報告コメントを作成してください。
-
-対象期間: {w_start}〜{w_end}
-
-## Backlog活動データ
-{backlog_summary}
-
-## Slack発言データ
-{slack_summary}
-
-## カレンダー（工数）データ
-{calendar_summary}
-合計: {aggregated['total_calendar_hours']:.1f}時間
-
-## 出力ルール
-- Backlogのコメント欄に貼り付けるMarkdown形式で出力
-- 案件・タスクごとに整理し、対応内容を簡潔に記載
-- Slackは補助情報として簡単にまとめる
-- カレンダーから工数サマリーを記載
-- 読みやすく、チームメンバーに伝わる文体で
-- 絵文字は見出しのみ使用
-- 最後に「自動転記」の旨を一行記載
-"""
-
-        try:
-            message = self.claude_client.messages.create(
-                model=self.claude_model,
-                max_tokens=2000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return message.content[0].text
-        except Exception as e:
-            logger.warning(f"Claude API エラー: {e}。ルールベース要約にフォールバックします")
-            return self.build_backlog_comment(aggregated)
 
     def build_comment_for_issue(self, issue_key: str, project_keys: list[str],
                                  channel_names: list[str], aggregated: dict,

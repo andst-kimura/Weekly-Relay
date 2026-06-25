@@ -29,6 +29,7 @@ from src.daily_summary import DailySummary
 from src.google_docs_client import GoogleDocsClient
 from src.gemini_client import GeminiClient
 from src.cleanup import CleanupTool
+from src.firestore_client import FirestoreClient
 
 # ログ設定
 Path("output").mkdir(exist_ok=True)
@@ -42,6 +43,18 @@ _stream_handler.setFormatter(_log_formatter)
 
 logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
 logger = logging.getLogger(__name__)
+
+# Google SDK / httpx / gRPC / absl の冗長ログを抑制
+for _noisy in ("httpx", "httpcore", "google.generativeai", "google.ai.generativelanguage",
+               "google.ai", "google.auth", "google.auth.transport",
+               "grpc", "grpc._channel", "absl"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+# absl-py は独自ロギングを持つため個別に抑制
+try:
+    import absl.logging as _absl_log
+    _absl_log.set_verbosity(_absl_log.WARNING)
+except ImportError:
+    pass
 
 
 def is_business_day(dt: datetime = None) -> bool:
@@ -81,6 +94,9 @@ def get_week_range(reference_dt: datetime = None) -> tuple[datetime, datetime]:
 
 def run_weekly_report(config: dict, reference_dt: datetime = None):
     """メイン処理: データ収集 → レポート生成 → Backlog転記"""
+    import time as _time
+    _started_at = _time.monotonic()
+
     logger.info("=" * 60)
     logger.info("Weekly Relay 開始")
     logger.info("=" * 60)
@@ -91,7 +107,6 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
     cfg_backlog = config["backlog"]
     cfg_slack = config["slack"]
     cfg_cal = config["google_calendar"]
-    cfg_claude = config.get("claude", {})
     cfg_report = config["report"]
 
     # ------------------------------------------------------------------ #
@@ -177,36 +192,46 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
     )
 
     # ------------------------------------------------------------------ #
+    # 5b. Firestore クライアント初期化
+    # ------------------------------------------------------------------ #
+    firestore_client = None
+    cfg_fs = config.get("firestore", {})
+    if cfg_fs.get("enabled", False):
+        try:
+            firestore_client = FirestoreClient()
+            logger.info("Firestore クライアント初期化完了")
+        except Exception as e:
+            logger.warning(f"Firestore 初期化失敗（ローカル出力にフォールバック）: {e}")
+
+    # ------------------------------------------------------------------ #
     # 6. レポート生成
     # ------------------------------------------------------------------ #
     logger.info("\n--- レポート生成 ---")
-    generator = ReportGenerator(
-        claude_api_key=cfg_claude.get("api_key", ""),
-        claude_enabled=cfg_claude.get("enabled", False),
-        claude_model=cfg_claude.get("model", "claude-sonnet-4-6"),
-    )
+    generator = ReportGenerator()
 
     aggregated = generator.aggregate(
         backlog_activities, slack_messages, calendar_events, week_start, week_end
     )
 
-    # AI要約 or ルールベース要約
-    if cfg_claude.get("enabled") and cfg_claude.get("api_key"):
-        comment_text = generator.build_backlog_comment_with_ai(
-            aggregated, backlog_activities, slack_messages
-        )
+    comment_text = generator.build_backlog_comment(
+        aggregated, meeting_docs=meeting_docs, gemini_client=gemini_client
+    )
+
+    # Firestore へ保存
+    if firestore_client:
+        firestore_client.save_weekly_report(week_start, week_end, comment_text)
+        if calendar_events:
+            firestore_client.save_calendar_report(calendar_events[0]["start_dt"], "\n".join(
+                f"{ev['start_dt'].strftime('%Y/%m/%d %H:%M')} {ev['summary']} ({ev['duration_hours']}h)"
+                for ev in calendar_events
+            ))
     else:
-        comment_text = generator.build_backlog_comment(
-            aggregated, meeting_docs=meeting_docs, gemini_client=gemini_client
-        )
-
-    # ローカル保存
-    local_path = generator.save_local_report(aggregated, comment_text, cfg_report["output_dir"])
-    logger.info(f"ローカルレポート: {local_path}")
-
-    cal_path = generator.save_calendar_report(calendar_events, cfg_report["output_dir"])
-    if cal_path:
-        logger.info(f"カレンダーレポート: {cal_path}")
+        # Firestore 無効時はローカルファイルに保存
+        local_path = generator.save_local_report(aggregated, comment_text, cfg_report["output_dir"])
+        logger.info(f"ローカルレポート: {local_path}")
+        cal_path = generator.save_calendar_report(calendar_events, cfg_report["output_dir"])
+        if cal_path:
+            logger.info(f"カレンダーレポート: {cal_path}")
 
     # ------------------------------------------------------------------ #
     # 7. Backlog 転記
@@ -236,13 +261,21 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
         kb = KnowledgeBase(
             backlog_client=backlog_client,
             slack_client=slack_client,
-            output_dir=cfg_kb.get("output_dir", "output/knowledge"),
             gemini_client=gemini_client,
+            firestore_client=firestore_client,
         )
         kb.generate(backlog_activities, week_start, week_end, meeting_docs=meeting_docs)
 
-    logger.info("\n✅ Weekly Relay 完了")
+    duration = _time.monotonic() - _started_at
+    logger.info(f"\n✅ Weekly Relay 完了（所要時間: {duration:.1f}秒）")
     logger.info("=" * 60)
+
+    if firestore_client:
+        firestore_client.write_sync_log(
+            status="success", job="weekly_report",
+            detail=f"backlog={len(backlog_activities)}, slack={len(slack_messages)}, meetings={len(meeting_docs)}",
+            duration_sec=round(duration, 1),
+        )
 
 
 def _make_clients(config: dict) -> tuple[BacklogClient, SlackClient]:
@@ -284,13 +317,8 @@ def run_daily_summary(config: dict) -> None:
     logger.info("=" * 60)
     logger.info("日次夕方サマリー 開始")
     backlog_client, slack_client = _make_clients(config)
-    cfg_claude = config.get("claude", {})
     cfg_gemini = config.get("gemini", {})
-    generator = ReportGenerator(
-        claude_api_key=cfg_claude.get("api_key", ""),
-        claude_enabled=False,
-        claude_model=cfg_claude.get("model", "claude-sonnet-4-6"),
-    )
+    generator = ReportGenerator()
     gemini_client = GeminiClient(
         api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
         model=cfg_gemini.get("model", "gemini-2.5-flash"),

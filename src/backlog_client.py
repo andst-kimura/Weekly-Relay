@@ -4,6 +4,7 @@ Backlog API クライアント
 """
 import requests
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 import logging
@@ -103,29 +104,35 @@ class BacklogClient:
                         })
         return my_comments
 
-    def get_all_my_activities(self, since: datetime, until: datetime, target_projects: list[str] = None, exclude_projects: list[str] = None) -> list[dict]:
-        """全プロジェクトから自分の活動を取得"""
-        projects = self.get_my_projects()
-        if target_projects:
-            projects = [p for p in projects if p["projectKey"] in target_projects]
-            logger.info(f"対象プロジェクトを絞り込み: {[p['projectKey'] for p in projects]}")
-        if exclude_projects:
-            projects = [p for p in projects if p["projectKey"] not in exclude_projects]
-            logger.info(f"除外後のプロジェクト: {[p['projectKey'] for p in projects]}")
-        all_activities = []
+    def _fetch_project_activities(self, project: dict, since: datetime, until: datetime) -> list[dict]:
+        """1プロジェクト分の活動を取得（並列実行用）"""
+        project_id = project["id"]
+        project_name = project["name"]
+        project_key = project["projectKey"]
+        logger.info(f"Backlog: プロジェクト '{project_name}' を処理中...")
+        activities = []
+        try:
+            assigned = self.get_issues_assigned_to_me(project_id, since, until)
+            for issue in assigned:
+                activities.append({
+                    "type": "assigned_issue",
+                    "project_name": project_name,
+                    "project_key": project_key,
+                    "issue_id": issue["id"],
+                    "issue_key": issue.get("issueKey", ""),
+                    "summary": issue.get("summary", ""),
+                    "status": issue.get("status", {}).get("name", ""),
+                    "parent_issue_id": issue.get("parentIssueId"),
+                    "updated": issue.get("updated", ""),
+                    "description": issue.get("description", ""),
+                })
 
-        for project in projects:
-            project_id = project["id"]
-            project_name = project["name"]
-            project_key = project["projectKey"]
-            logger.info(f"Backlog: プロジェクト '{project_name}' を処理中...")
-
-            try:
-                # 自分が担当者の更新課題
-                assigned = self.get_issues_assigned_to_me(project_id, since, until)
-                for issue in assigned:
-                    all_activities.append({
-                        "type": "assigned_issue",
+            created = self.get_issues_created_by_me(project_id, since, until)
+            created_ids = {i["id"] for i in assigned}
+            for issue in created:
+                if issue["id"] not in created_ids:
+                    activities.append({
+                        "type": "created_issue",
                         "project_name": project_name,
                         "project_key": project_key,
                         "issue_id": issue["id"],
@@ -137,43 +144,40 @@ class BacklogClient:
                         "description": issue.get("description", ""),
                     })
 
-                # 自分が作成した課題
-                created = self.get_issues_created_by_me(project_id, since, until)
-                created_ids = {i["id"] for i in assigned}
-                for issue in created:
-                    if issue["id"] not in created_ids:
-                        all_activities.append({
-                            "type": "created_issue",
-                            "project_name": project_name,
-                            "project_key": project_key,
-                            "issue_id": issue["id"],
-                            "issue_key": issue.get("issueKey", ""),
-                            "summary": issue.get("summary", ""),
-                            "status": issue.get("status", {}).get("name", ""),
-                            "parent_issue_id": issue.get("parentIssueId"),
-                            "updated": issue.get("updated", ""),
-                            "description": issue.get("description", ""),
-                        })
+            my_comments = self.get_my_comments_in_project(project_id, since, until)
+            for entry in my_comments:
+                activities.append({
+                    "type": "comment",
+                    "project_name": project_name,
+                    "project_key": project_key,
+                    "issue_id": entry["issue"]["id"],
+                    "issue_key": entry["issue"].get("issueKey", ""),
+                    "summary": entry["issue"].get("summary", ""),
+                    "status": entry["issue"].get("status", {}).get("name", ""),
+                    "parent_issue_id": entry["issue"].get("parentIssueId"),
+                    "comment_id": entry["comment"]["id"],
+                    "comment_content": entry["comment"].get("content", ""),
+                    "updated": entry["comment"].get("created", ""),
+                })
+        except Exception as e:
+            logger.warning(f"プロジェクト '{project_name}' の取得中にエラー: {e}")
+        return activities
 
-                # 自分のコメント
-                my_comments = self.get_my_comments_in_project(project_id, since, until)
-                for entry in my_comments:
-                    all_activities.append({
-                        "type": "comment",
-                        "project_name": project_name,
-                        "project_key": project_key,
-                        "issue_id": entry["issue"]["id"],
-                        "issue_key": entry["issue"].get("issueKey", ""),
-                        "summary": entry["issue"].get("summary", ""),
-                        "status": entry["issue"].get("status", {}).get("name", ""),
-                        "parent_issue_id": entry["issue"].get("parentIssueId"),
-                        "comment_id": entry["comment"]["id"],
-                        "comment_content": entry["comment"].get("content", ""),
-                        "updated": entry["comment"].get("created", ""),
-                    })
+    def get_all_my_activities(self, since: datetime, until: datetime, target_projects: list[str] = None, exclude_projects: list[str] = None) -> list[dict]:
+        """全プロジェクトから自分の活動を並列取得"""
+        projects = self.get_my_projects()
+        if target_projects:
+            projects = [p for p in projects if p["projectKey"] in target_projects]
+            logger.info(f"対象プロジェクトを絞り込み: {[p['projectKey'] for p in projects]}")
+        if exclude_projects:
+            projects = [p for p in projects if p["projectKey"] not in exclude_projects]
+            logger.info(f"除外後のプロジェクト: {[p['projectKey'] for p in projects]}")
 
-            except Exception as e:
-                logger.warning(f"プロジェクト '{project_name}' の取得中にエラー: {e}")
+        all_activities = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(self._fetch_project_activities, p, since, until): p for p in projects}
+            for future in as_completed(futures):
+                all_activities.extend(future.result())
 
         return all_activities
 
