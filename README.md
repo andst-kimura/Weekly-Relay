@@ -264,7 +264,50 @@ https://www.googleapis.com/auth/documents.readonly
 2. `.env` の `GEMINI_API_KEY` に設定
 3. `config/config.yaml` で `gemini.enabled: true` を確認
 
-### 7. `config/config.yaml` の編集
+### 7. Firestore の設定（GCP）
+
+Smart Sync と同じ GCP プロジェクト（`andst-hd-ax`）に `weekly-relay` DB を作成します。
+
+#### 7-1. gcloud CLI のセットアップ（未インストールの場合）
+
+https://cloud.google.com/sdk/docs/install からインストール後：
+
+```bash
+gcloud auth login
+gcloud config set project andst-hd-ax
+```
+
+#### 7-2. セットアップスクリプトの実行（Git Bash）
+
+```bash
+bash infra/setup_firestore.sh
+```
+
+スクリプトが以下を自動実行します：
+
+| ステップ | 内容 |
+|---|---|
+| ADC 認証確認 | 未認証の場合はブラウザで Google ログイン |
+| Firestore API 有効化 | `firestore.googleapis.com` |
+| DB 作成 | `weekly-relay`（Named Database・`asia-northeast1`） |
+| TTL 設定 | `context_snapshots`（30日）/ `sync_logs`（90日） |
+
+#### 7-3. `.env` に GCP 変数を追記
+
+```env
+GOOGLE_CLOUD_PROJECT=andst-hd-ax
+FIRESTORE_DATABASE=weekly-relay
+```
+
+#### 7-4. ADC 認証（ローカル実行用）
+
+```bash
+gcloud auth application-default login
+```
+
+> Smart Sync と同じ Google アカウントで認証済みであれば、このステップは不要な場合があります。
+
+### 8. `config/config.yaml` の編集
 
 ```yaml
 backlog:
