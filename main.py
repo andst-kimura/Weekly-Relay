@@ -415,7 +415,7 @@ def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> Non
         t = _time.monotonic()
         try:
             fs = FirestoreClient()
-            test_id = "__dry_run_test__"
+            test_id = "dry-run-test"
             fs.save_context_snapshot(test_id, {"ping": "pong", "source_type": "test"})
             result = fs.get_context_snapshot(test_id)
             if result and result.get("ping") == "pong":
