@@ -48,7 +48,7 @@ slack:
     販売チーム_ncr:
       project_key: "CORE_DB,CORE_INCIDENT"
       parent_issue_key: ""
-      label: "NCR関連"
+      label: "NCR社（販売コア・NCR-POS等メインベンダー）"
     販売チーム_ビジサク:
       project_key: ""
       parent_issue_key: ""
@@ -56,35 +56,43 @@ slack:
     販売チーム_sts:
       project_key: ""
       parent_issue_key: ""
-      label: "STS関連"
+      label: "STS社（ASTERIAデータ連携ベンダー）"
     販売チーム_フィジオ:
       project_key: ""
       parent_issue_key: ""
-      label: "フィジオ関連"
+      label: "フィジオ社（販売コア インデックス再構築・データ抽出ベンダー）"
     販売チーム_インフラ:
       project_key: ""
       parent_issue_key: ""
-      label: "インフラ関連"
+      label: "インフラチーム（AWS・Firebase等インフラ周り）"
     販売チームV2:
       project_key: ""
       parent_issue_key: ""
-      label: "全体共有"
+      label: "販売チーム内部コミュニケーション"
     販売チーム_all:
       project_key: ""
       parent_issue_key: ""
-      label: "全体共有"
+      label: "販売チーム全体（システム担当・ベンダー含む）"
     販売コーポレートチーム:
       project_key: ""
       parent_issue_key: ""
-      label: "コーポレート"
+      label: "販売チーム×コーポレートチーム連携"
     販売_データ:
       project_key: ""
       parent_issue_key: ""
-      label: "データ関連"
+      label: "データ分析チームとの連携"
     販売_ガバナンス:
       project_key: ""
       parent_issue_key: ""
-      label: "ガバナンス"
+      label: "ガバナンスチーム（請求処理・予算管理）"
+    pjt_客先開拓02:
+      project_key: ""
+      parent_issue_key: ""
+      label: "客先開拓プロジェクト"
+    新規-オープン-:
+      project_key: ""
+      parent_issue_key: ""
+      label: "新規オープン関連"
 # --- Google Calendar 設定 ---
 google_calendar:
   credentials_file: "config/google_credentials.json"  # OAuthクレデンシャルJSON

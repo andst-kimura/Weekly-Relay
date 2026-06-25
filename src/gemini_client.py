@@ -43,12 +43,35 @@ _FORMAT_COMMENT_PROMPT = """\
 =NextAction=
 ・（次のアクション・残課題を箇条書き。不明な場合は「引き続き対応中」）
 
-## 作成ルール
+## 作成ルール（厳守）
 - 箇条書きは「・」で始める（「-」「*」は使わない）
-- 転記先の親課題に関連する内容のみ抽出・要約する
+- 【最重要】データソースに明示的に記載されている事実のみを使用すること。データソースに存在しない内容の推測・補完・追加は厳禁
+- 転記先の親課題のテーマ・業務領域に直接関係する内容のみ抽出する。関係が曖昧・間接的な内容は含めない
 - 日付情報はデータソースから優先的に使用する
 - 具体的な課題名・会議名・決定事項を含める
 - 完了済みの内容は =Status= に、未完了・今後の予定は =NextAction= に記載する
+- 関連する内容がデータソース中に存在しない場合は「・対象期間中の活動なし」と記載する
+"""
+
+# 転記内容の矛盾チェック
+_CONSISTENCY_CHECK_PROMPT = """\
+以下は複数の Backlog 親課題に転記予定の週次進捗レポートです。
+各レポートの内容に事実の矛盾・相互矛盾がないか確認してください。
+
+## 転記予定のレポート一覧
+{reports_text}
+
+## 確認ルール
+- 同一の事実（日付・決定事項・担当者・数値等）が異なる課題に矛盾する形で記載されていないか
+- データソースに存在しない事実（ハルシネーション）が含まれていないか
+
+## 出力フォーマット（このフォーマットのみ出力。前置き・後置き不要）
+矛盾なし
+
+または
+
+矛盾あり:
+- [課題キー] 問題のある記述: 「...」 → 理由: ...
 """
 
 # 議事録要約
@@ -261,6 +284,28 @@ class GeminiClient:
         except Exception as e:
             logger.warning(f"Gemini Slack要約失敗: {e}")
             return ""
+
+    def check_comment_consistency(self, reports: list[dict]) -> str:
+        """
+        複数親課題への転記内容に矛盾がないか確認する。
+        reports: [{"issue_key": "SALES_TEAM-27", "summary": "...", "comment": "..."}]
+        戻り値: "矛盾なし" または 矛盾の説明文
+        """
+        if not self.enabled or len(reports) < 2:
+            return "矛盾なし"
+        try:
+            lines = []
+            for r in reports:
+                lines.append(f"### {r['issue_key']} {r['summary']}")
+                lines.append(r["comment"])
+                lines.append("")
+            prompt = _CONSISTENCY_CHECK_PROMPT.format(reports_text="\n".join(lines))
+            result = self._call(prompt)
+            logger.info(f"矛盾チェック結果: {result[:100]}")
+            return result
+        except Exception as e:
+            logger.warning(f"Gemini 矛盾チェック失敗: {e}")
+            return "矛盾なし"
 
     def build_daily_summary(self, date: str, activities: str) -> str:
         """当日の活動データから Slack 向け日次サマリー文を生成する"""
