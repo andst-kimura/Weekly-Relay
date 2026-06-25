@@ -449,11 +449,10 @@ class ReportGenerator:
         slack_msgs: list[dict],
         meeting_docs: list[dict],
     ) -> str:
-        """Gemini 無効時のルールベース =Status= / =NextAction= 生成"""
+        """Gemini 無効時のルールベース フォーマット生成"""
         CLOSED_STATUSES = ["完了", "クローズ", "Done", "Closed", "処理済み"]
 
-        status_items = []
-        next_items = []
+        system_items = []
         seen = set()
 
         for act in backlog_acts:
@@ -461,32 +460,25 @@ class ReportGenerator:
             if key in seen:
                 continue
             seen.add(key)
-            date = (act.get("updated") or "")[:10]
-            date_str = f"({date}) " if date else ""
-            status_items.append(
-                f"・{date_str}{key} {act.get('summary','')}（{act.get('status','')}）"
+            system_items.append(
+                f"・{key} {act.get('summary','')}（{act.get('status','')}）"
             )
-            if act.get("status") not in CLOSED_STATUSES:
-                next_items.append(f"・{key} {act.get('summary','')} - 継続対応")
 
         for msg in slack_msgs[:5]:
-            date = msg["datetime"].strftime("%m/%d")
             text = (msg.get("text") or "")[:60].replace("\n", " ")
-            status_items.append(f"・({date}) #{msg.get('channel_name','')}: {text}")
+            system_items.append(f"・#{msg.get('channel_name','')}: {text}")
 
         for doc in meeting_docs:
-            status_items.append(f"・({doc['created_date']}) 会議: {doc['title']}")
+            system_items.append(f"・会議: {doc['title']}")
 
-        if not next_items:
-            next_items = ["・引き続き対応中"]
-
-        lines = (
-            ["=Status="]
-            + (status_items if status_items else ["・（活動なし）"])
-            + ["", "=NextAction="]
-            + next_items
+        progress_section = (
+            "■現在の進捗\n" + "\n".join(system_items)
+            if system_items
+            else "■現在の進捗\n・対象期間中の活動なし"
         )
-        return "\n".join(lines)
+        risk_section = "■リスク共有\n特になし"
+
+        return "\n\n".join([progress_section, risk_section])
 
     def build_daily_summary(self, aggregated: dict) -> str:
         """日次夕方サマリー用テキスト生成（Slack DM送信用・Slackマークダウン形式）"""
