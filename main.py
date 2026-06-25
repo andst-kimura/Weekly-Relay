@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # Google SDK / httpx / gRPC / absl の冗長ログを抑制
 # "AFC is enabled" は google 親ロガー配下から出るため google 全体を WARNING に設定
 for _noisy in ("httpx", "httpcore", "google", "grpc", "grpc._channel", "absl",
-               "googleapiclient.discovery_cache"):
+               "googleapiclient.discovery_cache", "google_genai"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 # absl-py は独自ロギングを持つため個別に抑制
 try:
