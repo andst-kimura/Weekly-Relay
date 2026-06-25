@@ -4,87 +4,152 @@
 
 ---
 
-## 概要
+## What is this?
 
-Weekly Relay は、毎週の進捗報告に関わる以下の作業を自動化します。
+週次の進捗報告に関わる以下の手作業を自動化するシステム。
 
-```
-[毎週金曜 18:00]
-
-  Backlog       → 自分が担当 / 作成 / コメントした課題
-  Slack         → 自分が参加した全チャンネルの発言
-  Google Cal    → 参加したミーティング一覧
-  Google Meet   → 参加した全 MTG の Gemini 議事録（添付ファイル経由）
-        ↓
-  Gemini 2.5 Flash による要約・親課題判別
-        ↓
-  Backlog 親課題へ =Status= / =NextAction= 形式でコメント転記
-        ↓
-  ナレッジベース（チケット / Slack / 議事録）を Markdown で蓄積
-```
+| やること | 手動（今まで） | このシステム |
+|---|---|---|
+| Backlog 転記 | チケット・Slack を手動確認して書き込み | 毎週金曜 18:00 に自動収集・転記 |
+| 議事録反映 | Google Meet 議事録を手動確認 | カレンダー添付 / Meet フォルダから自動取得 |
+| ナレッジ蓄積 | 議事録・チケット・Slack が散在 | Markdown で `output/knowledge/` に自動整理 |
+| 未対応チケット管理 | 手動でBacklogを確認 | N営業日更新なしで Slack DM 通知 |
 
 ---
 
-## 機能一覧
+## How it's built
 
-### 1. 週次進捗レポート自動転記
+### 技術スタック
 
-週の活動データを収集し、Backlog の各親課題へコメントを投稿します。
+| 用途 | 技術 |
+|---|---|
+| バッチ処理 | Python + `schedule` ライブラリ（ローカル常駐 or タスクスケジューラ） |
+| AI エンジン | Gemini API（`gemini-2.5-flash`） |
+| Backlog 連携 | Backlog REST API v2 |
+| Slack 連携 | Slack SDK（Bot Token） |
+| Google 連携 | Google Calendar / Drive / Docs API（OAuth2） |
+| 設定管理 | `config/config.yaml` + `.env` |
 
-**転記フォーマット**
+### 設計方針
+
+- **ローカル完結**: GCP 等のクラウドインフラ不要。Python スクリプトとタスクスケジューラのみで動作
+- **Gemini フォールバック**: `gemini.enabled: false` でルールベース要約に自動フォールバック
+- **3段階の親課題判別**: `channel_mapping` 明示指定 → Backlog API で確定的解決 → Gemini 推測
+- **矛盾チェック**: 複数親課題への転記内容を Gemini で横断チェック（Gemini 有効時）
+
+---
+
+## Processing Flow
+
+### 週次レポート（毎週金曜 18:00）
+
+```mermaid
+sequenceDiagram
+    participant SCH as スケジューラ（18:00）
+    participant BL as Backlog API
+    participant SL as Slack API
+    participant CAL as Google Calendar
+    participant DRIVE as Google Drive / Docs
+    participant GEM as Gemini API
+    participant OUT as 出力先
+
+    SCH->>BL: Step 1: 担当・作成・コメントチケット取得
+    SCH->>SL: Step 2: 自分の発言・スレッド取得
+    SCH->>CAL: Step 3: イベント一覧・工数取得
+    SCH->>DRIVE: Step 4: Meet 議事録収集（フォルダ + カレンダー添付）
+    SCH->>GEM: Step 5: Gemini クライアント初期化
+    SCH->>OUT: Step 6: ローカルレポート生成・保存
+    SCH->>BL: Step 7: 親課題を判別してコメント転記
+    Note over BL,GEM: ① channel_mapping → ② Backlog API 遡及 → ③ Gemini 判別 → ④ 矛盾チェック
+    SCH->>OUT: Step 8: ナレッジベース生成（tickets / slack / meetings）
+```
+
+### 日次アラート / サマリー
+
+| ジョブ | 実行時刻 | 処理内容 |
+|---|---|---|
+| 未対応チケット警告 | 毎日 09:00（土日祝スキップ） | N 営業日更新なしのチケットを Slack DM 通知 |
+| 日次夕方サマリー | 毎日 17:30（土日祝スキップ） | 当日の Backlog・Slack 活動を Gemini で整形して Slack DM 通知 |
+
+---
+
+## Backlog 転記フォーマット
+
+Backlog の各親課題へ投稿されるコメントのフォーマット。Gemini 有効時は AI 整形、無効時はルールベースで生成。
+
+**Gemini 有効時（3セクション構成）**
 
 ```
 ## Weekly Relay 週次進捗レポート YYYY/MM/DD〜YYYY/MM/DD
 
-=Status=
-・(MM/DD) 完了した対応内容を箇条書き
+---
 
-=NextAction=
-・次のアクション・残課題を箇条書き
+■現在の進捗
+・完了した対応内容・合意事項・決定事項
+　└ 詳細・補足（サブ項目）
+　▼スケジュール（日程が明確な場合のみ）
+　　MM/DD〜MM/DD：フェーズ名
+
+■今後のスケジュール
+MM/DD：マイルストーン・締切内容
+（スケジュールがない場合はセクションごと省略）
+
+■リスク共有
+・リスク・懸念事項
+（なければ「特になし」）
 
 ---
 *このコメントは Weekly Relay により自動転記されました*
 ```
 
-**親課題の判別ロジック（3段階）**
+**Gemini 無効時（ルールベースフォールバック）**
 
-| 優先度 | 方法 | 対象 |
-|--------|------|------|
-| ① | `config.yaml` の `channel_mapping` で明示指定 | Slack チャンネル → 親課題 |
-| ② | Backlog API で親課題チェーンを遡及（確定的） | Backlog 活動 → SALES_TEAM 親課題 |
-| ③ | Gemini AI で判別 | ①②未対応の Slack チャンネル |
-
-### 2. Google Meet 議事録の収集
-
-- **自分がオーナーの MTG**：Meet Recordings フォルダから取得
-- **参加した全 MTG**：カレンダーイベントの添付ファイルから取得
-- 内容が空の議事録（Gemini 未生成）は自動フィルタリング
-
-### 3. ナレッジベース自動生成
-
-週次レポートと同時に `output/knowledge/` 以下へ Markdown を蓄積します。
-
-| 種別 | 保存先 | 内容 |
-|------|--------|------|
-| チケット KB | `tickets/ISSUE-KEY.md` | 課題詳細・対応履歴 + Gemini 要約 |
-| Slack KB | `slack/YYYYWW_channel.md` | 週次発言・スレッド + Gemini 要約 |
-| 議事録 KB | `meetings/YYYYMMDD_タイトル.md` | 議事録全文 + Gemini 要約 |
-
-### 4. 未対応チケット警告（毎朝）
-
-設定した営業日数以上更新のないチケットを検出し、Slack DM で通知します。
-
-### 5. 日次夕方サマリー
-
-当日の Backlog 活動と Slack 発言を Gemini で自然文にまとめ、Slack DM で送信します。
+```
+## Weekly Relay 週次進捗レポート YYYY/MM/DD〜YYYY/MM/DD
 
 ---
 
-## ファイル構成
+■現在の進捗
+・ISSUE-KEY 課題名（ステータス）
+・#channel_name: 発言サンプル
+・会議: 議事録タイトル
+
+■リスク共有
+特になし
+
+---
+*このコメントは Weekly Relay により自動転記されました*
+```
+
+**親課題の判別ロジック（4段階）**
+
+| 優先度 | 方法 | 対象 |
+|---|---|---|
+| ① | `config.yaml` の `channel_mapping` で明示指定 | Slack チャンネル → 親課題 |
+| ② | Backlog API で親課題チェーンを遡及（確定的） | Backlog 活動 → SALES_TEAM 親課題 |
+| ③ | Gemini AI で判別（Gemini 有効時のみ） | ①②未対応の Slack チャンネル |
+| ④ | Gemini で転記内容の矛盾チェック（Gemini 有効時のみ） | 全転記結果を横断検証 |
+
+---
+
+## Google Meet 議事録の収集
+
+2つのソースから議事録を収集し、重複排除してマージします。
+
+| ソース | 対象 | 取得方法 |
+|---|---|---|
+| Meet Recordings フォルダ | 自分がオーナーの MTG | Drive API でフォルダ内 Docs を取得 |
+| カレンダー添付ファイル | 参加した全 MTG | Calendar API のイベント添付から Docs を取得 |
+
+内容が空の議事録（Gemini 未生成）は自動フィルタリングします。
+
+---
+
+## Directory Structure
 
 ```
-Weekly-Relay/
-├── main.py                         # エントリーポイント・スケジューラー
+Weekly Relay/
+├── main.py                         # エントリーポイント・スケジューラ
 ├── requirements.txt                # 依存パッケージ
 ├── .env                            # APIキー類（要作成・Git管理外）
 ├── config/
@@ -96,31 +161,33 @@ Weekly-Relay/
 │   ├── backlog_poster.py           # 親課題判別・コメント転記
 │   ├── slack_client.py             # Slack SDK クライアント
 │   ├── google_calendar_client.py   # Google Calendar API クライアント
-│   ├── google_docs_client.py       # Google Drive / Docs API クライアント
-│   ├── gemini_client.py            # Gemini API クライアント（要約・判別）
+│   ├── google_docs_client.py       # Google Drive / Docs API クライアント（議事録取得）
+│   ├── gemini_client.py            # Gemini API クライアント（要約・判別・転記フォーマット）
 │   ├── report_generator.py         # レポート生成（Gemini / ルールベース）
 │   ├── knowledge_base.py           # ナレッジベース生成
 │   ├── ticket_alert.py             # 未対応チケット警告
-│   └── daily_summary.py            # 日次夕方サマリー
-├── tests/                          # pytest テスト（41件）
+│   ├── daily_summary.py            # 日次夕方サマリー
+│   └── cleanup.py                  # 転記済みコメント・課題の削除ツール
+├── tests/                          # pytest テスト
 ├── docs/
 │   └── requirements_v2.md          # 詳細要件定義
 └── output/                         # 生成物（Git管理外）
-    ├── weekly_report_YYYYMMDD.md
-    ├── run.log
+    ├── weekly_report_YYYYMMDD.md   # 週次レポート全文
+    ├── calendar_report_YYYYMMDD.md # カレンダー工数サマリー
+    ├── run.log                     # 実行ログ（ローテーション付き）
     └── knowledge/
-        ├── tickets/
-        ├── slack/
-        └── meetings/
+        ├── tickets/                # チケット別対応履歴
+        ├── slack/                  # チャンネル別 Slack スレッド
+        └── meetings/               # 議事録全文
 ```
 
 ---
 
-## セットアップ
+## Setup
 
 ### 1. 必要な環境
 
-- Python 3.11 以上
+Python 3.11 以上
 
 ```bash
 pip install -r requirements.txt
@@ -158,7 +225,7 @@ python main.py --check-user-id
 2. **OAuth & Permissions** → Bot Token Scopes に以下を追加：
 
 | スコープ | 用途 |
-|----------|------|
+|---|---|
 | `channels:history` | パブリックチャンネルのメッセージ取得 |
 | `channels:read` | チャンネル一覧の取得 |
 | `groups:history` | プライベートチャンネルのメッセージ取得 |
@@ -182,6 +249,14 @@ python main.py --check-user-id
 3. **認証情報** → **OAuth クライアント ID** → アプリの種類：**デスクトップアプリ**
 4. ダウンロードした JSON を `config/google_credentials.json` に保存
 5. 初回実行時にブラウザで Google 認証 → `google_token.pickle` が自動生成
+
+必要な OAuth スコープ：
+
+```
+https://www.googleapis.com/auth/calendar.readonly
+https://www.googleapis.com/auth/drive.readonly
+https://www.googleapis.com/auth/documents.readonly
+```
 
 ### 6. Gemini API の設定
 
@@ -224,7 +299,7 @@ gemini:
 report:
   output_dir: "output"
   auto_post_to_backlog: true
-  dry_run: false                         # true でBacklog書き込みをスキップ
+  dry_run: false                         # true で Backlog 書き込みをスキップ
 
 knowledge_base:
   enabled: true
@@ -232,7 +307,7 @@ knowledge_base:
 
 ticket_alert:
   enabled: true
-  stale_business_days: 3                 # N営業日更新なしで警告
+  stale_business_days: 3                 # N 営業日更新なしで警告
   run_hour: 9
   run_minute: 0
 
@@ -244,7 +319,7 @@ daily_summary:
 
 ---
 
-## 実行方法
+## Usage
 
 ### 動作確認（Backlog への書き込みなし）
 
@@ -258,7 +333,7 @@ python main.py --run-now --dry-run
 python main.py --run-now
 ```
 
-### スケジューラー起動（毎週金曜 18:00 に自動実行）
+### スケジューラ起動（毎週金曜 18:00 に自動実行）
 
 ```bash
 python main.py
@@ -326,7 +401,7 @@ python main.py --cleanup
 **選択肢の入力形式**
 
 | 入力 | 動作 |
-|------|------|
+|---|---|
 | `1` | 番号 1 のみ削除 |
 | `1,3` | 番号 1 と 3 を削除 |
 | `all` | 表示されている全件を削除 |
@@ -336,11 +411,11 @@ python main.py --cleanup
 
 ---
 
-## コマンドライン引数一覧
+## Command Reference
 
 | 引数 | 説明 |
-|------|------|
-| `--run-now` | スケジューラーを待たず今すぐ週次レポートを実行 |
+|---|---|
+| `--run-now` | スケジューラを待たず今すぐ週次レポートを実行 |
 | `--dry-run` | Backlog への書き込みをスキップして動作確認 |
 | `--cleanup` | 転記済みコメント・課題を対話形式で削除 |
 | `--run-alert` | 未対応チケット警告を今すぐ実行 |
@@ -350,23 +425,27 @@ python main.py --cleanup
 
 ---
 
-## トラブルシューティング
+## Troubleshooting
 
 | エラー | 原因 | 対処 |
-|--------|------|------|
+|---|---|---|
 | `401 Unauthorized` | Backlog API キーが無効 | キーを再発行して `.env` を更新 |
 | `not_in_channel` | Bot が Slack チャンネルに未参加 | `/invite @ボット名` で招待 |
 | `403 insufficientPermissions` | Google トークンのスコープ不足 | `google_token.pickle` を削除して再認証 |
-| `403 accessNotConfigured` | Drive / Docs API が未有効 | Google Cloud Console でAPIを有効化 |
+| `403 accessNotConfigured` | Drive / Docs API が未有効 | Google Cloud Console で API を有効化 |
 | `403 The caller does not have permission` | 議事録ドキュメントの閲覧権限なし | 正常動作（権限なし議事録はスキップ） |
 | Gemini 判別の誤分類 | 関連性が低い内容が混入 | `channel_mapping` で明示マッピングを追加 |
 
 ---
 
-## テスト
+## Testing
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-50 件のテストがすべてパスすることを確認しています。
+---
+
+## Related
+
+- [docs/requirements_v2.md](docs/requirements_v2.md) — 詳細要件定義（v2.1）

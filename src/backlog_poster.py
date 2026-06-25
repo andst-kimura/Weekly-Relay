@@ -42,10 +42,10 @@ class BacklogPoster:
             issue_id = issue["id"]
             if self.dry_run:
                 logger.info(f"[DRY RUN] コメント転記スキップ: {issue_key}")
-                return {"action": "comment_skipped_dry_run", "issue_key": issue_key}
+                return {"action": "comment_skipped_dry_run", "issue_key": issue_key, "comment": content}
             self.client.add_comment_to_issue(issue_id, content)
             logger.info(f"✅ コメント転記完了: {issue_key}")
-            return {"action": "commented", "issue_key": issue_key}
+            return {"action": "commented", "issue_key": issue_key, "comment": content}
         except Exception as e:
             logger.error(f"コメント転記失敗 {issue_key}: {e}")
             return {"action": "error", "issue_key": issue_key, "error": str(e)}
@@ -225,6 +225,26 @@ class BacklogPoster:
                 gemini_client=gemini_client,
                 already_posted=posted_issue_keys,
             )
+
+        # ------------------------------------------------------------------ #
+        # ④ 転記内容の矛盾チェック（Gemini）
+        # ------------------------------------------------------------------ #
+        if gemini_client and gemini_client.enabled and len(results) >= 2:
+            reports_for_check = [
+                {
+                    "issue_key": r.get("issue_key", ""),
+                    "summary": "",
+                    "comment": r.get("comment", ""),
+                }
+                for r in results
+                if r.get("comment") and r.get("issue_key")
+            ]
+            if len(reports_for_check) >= 2:
+                consistency = gemini_client.check_comment_consistency(reports_for_check)
+                if "矛盾あり" in consistency:
+                    logger.warning(f"⚠️ 転記内容に矛盾が検出されました:\n{consistency}")
+                else:
+                    logger.info("✅ 転記内容の矛盾チェック: 問題なし")
 
         return results
 
