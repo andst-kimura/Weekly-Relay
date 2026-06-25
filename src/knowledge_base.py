@@ -16,7 +16,7 @@ from src.slack_client import SlackClient
 logger = logging.getLogger(__name__)
 
 JST = timezone(timedelta(hours=9))
-_TICKET_WORKERS = 10  # Backlog API の並列数
+_TICKET_WORKERS = 8   # Backlog API の並列数（×2内部スレッドで最大16接続）
 _MEETING_WORKERS = 10 # 議事録 KB（ドキュメント取得済みのため並列安全）
 _SLACK_WORKERS = 3    # Slack KB（API 呼び出しあり、レート制限を考慮して控えめ）
 
