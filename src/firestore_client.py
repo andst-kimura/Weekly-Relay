@@ -20,21 +20,10 @@ _TTL_DAYS_CONTEXT = 30
 def _get_db() -> firestore.Client:
     db_name = os.environ.get("FIRESTORE_DATABASE", "weekly-relay")
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", "weekly-relay")
-    # 社内プロキシ環境では gRPC の SSL ハンドシェイクが失敗するため REST トランスポートに切り替え
-    # prefer_rest は >= 2.14.0 で利用可能。古いバージョンは REST transport を直接指定。
-    try:
-        return firestore.Client(database=db_name, project=project, prefer_rest=True)
-    except TypeError:
-        pass
-    try:
-        from google.cloud.firestore_v1.services.firestore.transports.rest import (
-            FirestoreRestTransport,
-        )
-        transport = FirestoreRestTransport(host="firestore.googleapis.com")
-        return firestore.Client(database=db_name, project=project, _transport=transport)
-    except Exception as e:
-        logger.warning(f"REST transport 設定失敗、gRPC にフォールバック: {e}")
-        return firestore.Client(database=db_name, project=project)
+    # 社内プロキシ環境では gRPC の SSL ハンドシェイクが失敗する。
+    # GOOGLE_CLOUD_DISABLE_GRPC=true を設定して REST に強制切り替え。
+    os.environ.setdefault("GOOGLE_CLOUD_DISABLE_GRPC", "true")
+    return firestore.Client(database=db_name, project=project)
 
 
 class FirestoreClient:
