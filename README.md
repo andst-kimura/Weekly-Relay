@@ -12,7 +12,7 @@
 |---|---|---|
 | Backlog 転記 | チケット・Slack を手動確認して書き込み | 毎週金曜 18:00 に自動収集・転記 |
 | 議事録反映 | Google Meet 議事録を手動確認 | カレンダー添付 / Meet フォルダから自動取得 |
-| ナレッジ蓄積 | 議事録・チケット・Slack が散在 | Markdown で `output/knowledge/` に自動整理 |
+| ナレッジ蓄積 | 議事録・チケット・Slack が散在 | Firestore `context_snapshots` コレクションへ自動蓄積 |
 | 未対応チケット管理 | 手動でBacklogを確認 | N営業日更新なしで Slack DM 通知 |
 
 ---
@@ -28,14 +28,17 @@
 | Backlog 連携 | Backlog REST API v2 |
 | Slack 連携 | Slack SDK（Bot Token） |
 | Google 連携 | Google Calendar / Drive / Docs API（OAuth2） |
+| データ永続化 | Firestore REST API（gRPC 不使用・`requests` ベース） |
 | 設定管理 | `config/config.yaml` + `.env` |
 
 ### 設計方針
 
-- **ローカル完結**: GCP 等のクラウドインフラ不要。Python スクリプトとタスクスケジューラのみで動作
 - **Gemini フォールバック**: `gemini.enabled: false` でルールベース要約に自動フォールバック
 - **3段階の親課題判別**: `channel_mapping` 明示指定 → Backlog API で確定的解決 → Gemini 推測
 - **矛盾チェック**: 複数親課題への転記内容を Gemini で横断チェック（Gemini 有効時）
+- **Firestore REST**: 社内プロキシ環境の gRPC SSL 問題を回避するため、Firestore SDK を使わず REST API を直接呼び出す
+- **データキャッシュ**: `--only report` / `--only kb` の2回目以降は `output/cache/YYYYMMDD.pkl` から即座にロードして API 呼び出しを省略
+- **議事録要約並列化**: `pre_summarize_meetings()` で全議事録の Gemini 要約を `ThreadPoolExecutor(workers=10)` で並列実行し、以降の処理で `doc["_summary"]` を再利用
 
 ---
 
@@ -51,17 +54,18 @@ sequenceDiagram
     participant CAL as Google Calendar
     participant DRIVE as Google Drive / Docs
     participant GEM as Gemini API
-    participant OUT as 出力先
+    participant FS as Firestore（REST）
 
     SCH->>BL: Step 1: 担当・作成・コメントチケット取得
     SCH->>SL: Step 2: 自分の発言・スレッド取得
     SCH->>CAL: Step 3: イベント一覧・工数取得
     SCH->>DRIVE: Step 4: Meet 議事録収集（フォルダ + カレンダー添付）
     SCH->>GEM: Step 5: Gemini クライアント初期化
-    SCH->>OUT: Step 6: ローカルレポート生成・保存
-    SCH->>BL: Step 7: 親課題を判別してコメント転記
+    SCH->>GEM: Step 6: 議事録要約を並列実行（workers=10）
+    SCH->>FS: Step 7: 週次・カレンダーレポートを Firestore へ保存
+    SCH->>BL: Step 8: 親課題を判別してコメント転記
     Note over BL,GEM: ① channel_mapping → ② Backlog API 遡及 → ③ Gemini 判別 → ④ 矛盾チェック
-    SCH->>OUT: Step 8: ナレッジベース生成（tickets / slack / meetings）
+    SCH->>FS: Step 9: ナレッジベース生成（tickets / slack / meetings）
 ```
 
 ### 日次アラート / サマリー
@@ -145,6 +149,29 @@ MM/DD：マイルストーン・締切内容
 
 ---
 
+## ナレッジベース（Firestore）
+
+KB 生成で作成されるドキュメントは Firestore `context_snapshots` コレクションに保存されます。
+
+| ドキュメントID形式 | 内容 | TTL |
+|---|---|---|
+| `ticket_{ISSUE-KEY}` | チケット要約・コメント履歴 | 30日 |
+| `slack_{YYYYWW}_{channel_name}` | Slack チャンネル週次まとめ | 30日 |
+| `meeting_{YYYYMMDD}_{doc_id末尾12文字}` | 議事録全文・AI要約 | 30日 |
+
+**差分スキップ**: チケット KB はすでに保存済みの `backlog_updated_at` と比較し、変更がなければ API 呼び出しをスキップします。
+
+**並列処理の構成**
+
+| 処理 | workers | 備考 |
+|---|---|---|
+| 議事録要約（Gemini） | 10 | `pre_summarize_meetings()` で事前並列実行 |
+| チケット KB | 8 | 各チケット内で `get_issue` + `get_all_comments` をさらに2並列 |
+| Slack KB | 3 | Slack API レート制限を考慮して控えめ |
+| 議事録 KB | 10 | 事前要約済みのため Gemini 呼び出しなし |
+
+---
+
 ## Directory Structure
 
 ```
@@ -163,8 +190,9 @@ Weekly Relay/
 │   ├── google_calendar_client.py   # Google Calendar API クライアント
 │   ├── google_docs_client.py       # Google Drive / Docs API クライアント（議事録取得）
 │   ├── gemini_client.py            # Gemini API クライアント（要約・判別・転記フォーマット）
-│   ├── report_generator.py         # レポート生成（Gemini / ルールベース）
-│   ├── knowledge_base.py           # ナレッジベース生成
+│   ├── report_generator.py         # レポート生成（Gemini / ルールベース）・議事録並列要約
+│   ├── knowledge_base.py           # ナレッジベース生成（Firestore 保存）
+│   ├── firestore_client.py         # Firestore REST API クライアント（gRPC 不使用）
 │   ├── ticket_alert.py             # 未対応チケット警告
 │   ├── daily_summary.py            # 日次夕方サマリー
 │   └── cleanup.py                  # 転記済みコメント・課題の削除ツール
@@ -172,13 +200,13 @@ Weekly Relay/
 ├── docs/
 │   └── requirements_v2.md          # 詳細要件定義
 └── output/                         # 生成物（Git管理外）
-    ├── weekly_report_YYYYMMDD.md   # 週次レポート全文
-    ├── calendar_report_YYYYMMDD.md # カレンダー工数サマリー
+    ├── cache/
+    │   └── YYYYMMDD.pkl            # 当日データキャッシュ（--only report/kb で再利用）
     ├── run.log                     # 実行ログ（ローテーション付き）
-    └── knowledge/
-        ├── tickets/                # チケット別対応履歴
-        ├── slack/                  # チャンネル別 Slack スレッド
-        └── meetings/               # 議事録全文
+    └── knowledge/                  # ローカル参照用（Firestore 無効時のフォールバック）
+        ├── tickets/
+        ├── slack/
+        └── meetings/
 ```
 
 ---
@@ -268,13 +296,15 @@ https://www.googleapis.com/auth/documents.readonly
 
 個人用 GCP プロジェクト（`weekly-relay`）に Named Database `weekly-relay` を作成します。DB 名を明示することで、将来 Smart Sync と同じプロジェクトへ統合する際も `smart-sync` DB と明確に区別できます。
 
+> **注意**: 本ツールの Firestore クライアントは gRPC SDK を使用せず、REST API を直接呼び出します。社内プロキシ環境での `SSL_ERROR_SSL` を回避するため、Python 標準の `requests`（urllib3 + certifi）で通信します。
+
 #### 7-1. gcloud CLI のセットアップ（未インストールの場合）
 
 https://cloud.google.com/sdk/docs/install からインストール後：
 
 ```bash
 gcloud auth login
-gcloud config set project andst-hd-ax
+gcloud config set project weekly-relay
 ```
 
 #### 7-2. セットアップスクリプトの実行（Git Bash）
@@ -337,6 +367,9 @@ gemini:
   model: "gemini-2.5-flash"
   api_key: "${GEMINI_API_KEY}"
 
+firestore:
+  enabled: true                          # false でローカルファイル出力にフォールバック
+
 report:
   output_dir: "output"
   auto_post_to_backlog: true
@@ -398,6 +431,25 @@ python main.py --run-summary
 python main.py --check-user-id
 ```
 
+### 特定機能のみ実行（`--only` モード）
+
+フル実行の前に特定機能だけを単独で動作確認する際に使用します。Backlog への転記は一切行いません。
+
+```bash
+python main.py --only <機能名>
+```
+
+| 機能名 | 動作 |
+|---|---|
+| `backlog` | Backlog 活動の取得件数とチケット一覧（最大10件）をログ出力 |
+| `slack` | Slack メッセージの取得件数をログ出力 |
+| `calendar` | カレンダーイベント一覧・議事録件数をログ出力 |
+| `firestore` | テストドキュメントの書き込み・読み込みで接続確認 |
+| `report` | データ収集 → Gemini 要約 → レポート本文生成（転記なし） |
+| `kb` | ナレッジベース生成（Firestore `context_snapshots` への保存） |
+
+> **データキャッシュ**: `--only report` / `--only kb` は初回実行時に Backlog・Slack・Calendar・議事録のデータを `output/cache/YYYYMMDD.pkl` に保存します。2回目以降は API 呼び出しをスキップしてキャッシュから即座にロードします（当日中有効）。
+
 ### クリーンアップ（転記内容の削除）
 
 動作確認後にテスト転記を削除したい場合に使用します。
@@ -458,6 +510,7 @@ python main.py --cleanup
 |---|---|
 | `--run-now` | スケジューラを待たず今すぐ週次レポートを実行 |
 | `--dry-run` | Backlog への書き込みをスキップして動作確認 |
+| `--only <機能名>` | 特定機能のみ実行（`backlog` / `slack` / `calendar` / `firestore` / `report` / `kb`） |
 | `--cleanup` | 転記済みコメント・課題を対話形式で削除 |
 | `--run-alert` | 未対応チケット警告を今すぐ実行 |
 | `--run-summary` | 日次夕方サマリーを今すぐ実行 |
@@ -475,6 +528,8 @@ python main.py --cleanup
 | `403 insufficientPermissions` | Google トークンのスコープ不足 | `google_token.pickle` を削除して再認証 |
 | `403 accessNotConfigured` | Drive / Docs API が未有効 | Google Cloud Console で API を有効化 |
 | `403 The caller does not have permission` | 議事録ドキュメントの閲覧権限なし | 正常動作（権限なし議事録はスキップ） |
+| `403 PERMISSION_DENIED`（Firestore） | ADC 認証が未設定 | `gcloud auth application-default login` を実行 |
+| `400 Bad Request`（Firestore） | ドキュメント ID が予約済み形式（`__...__`） | ドキュメント ID を変更（`__` で囲まない） |
 | Gemini 判別の誤分類 | 関連性が低い内容が混入 | `channel_mapping` で明示マッピングを追加 |
 
 ---
