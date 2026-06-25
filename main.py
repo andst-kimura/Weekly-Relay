@@ -533,6 +533,9 @@ def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> Non
             api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
             model=cfg_gemini.get("model", "gemini-2.0-flash"),
         )
+        # 議事録要約を並列計算して doc["_summary"] に格納 → KB 内の逐次呼び出しを排除
+        ReportGenerator().pre_summarize_meetings(meeting_docs, gemini)
+
         fs = None
         if cfg_fs.get("enabled", False):
             try:
