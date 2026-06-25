@@ -16,8 +16,8 @@ from src.slack_client import SlackClient
 logger = logging.getLogger(__name__)
 
 JST = timezone(timedelta(hours=9))
-_TICKET_WORKERS = 5   # Backlog API の並列数
-_MEETING_WORKERS = 5  # 議事録 KB（ドキュメント取得済みのため並列安全）
+_TICKET_WORKERS = 10  # Backlog API の並列数
+_MEETING_WORKERS = 10 # 議事録 KB（ドキュメント取得済みのため並列安全）
 _SLACK_WORKERS = 3    # Slack KB（API 呼び出しあり、レート制限を考慮して控えめ）
 
 
@@ -81,9 +81,13 @@ class KnowledgeBase:
                 logger.info(f"チケットKBスキップ（変更なし）: {issue_key}")
                 return
 
-        # ① Backlog API フェッチ（並列実行される）
-        issue = self.backlog.get_issue(issue_key)
-        comments = self.backlog.get_all_comments(issue["id"])
+        # ① Backlog API フェッチ: get_issue と get_all_comments を同時実行
+        # act["issue_id"] は activities 収集時に取得済みのため事前に渡せる
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            _f_issue = _ex.submit(self.backlog.get_issue, issue_key)
+            _f_comments = _ex.submit(self.backlog.get_all_comments, act["issue_id"])
+            issue = _f_issue.result()
+            comments = _f_comments.result()
 
         assignee = issue.get("assignee") or {}
         status_name = issue.get("status", {}).get("name", "")
@@ -264,9 +268,11 @@ class KnowledgeBase:
             display_name = title
 
         raw_text = doc.get("text", "")
-        ai_summary = ""
-        if self.gemini and self.gemini.enabled and raw_text:
+        # pre_summarize_meetings() で事前計算済みの要約があれば再利用
+        ai_summary = doc.get("_summary", None)
+        if ai_summary is None and self.gemini and self.gemini.enabled and raw_text:
             ai_summary = self.gemini.summarize_meeting(raw_text) or ""
+        ai_summary = ai_summary or ""
 
         doc_id = f"meeting_{date_str}_{(doc.get('id') or display_name)[-12:]}"
         data = {
