@@ -148,13 +148,16 @@ class SlackClient:
                         "reply_count": msg.get("reply_count", 0),
                     })
 
-            # スレッド返信も取得
+            # スレッド返信も取得（自分が親投稿者 or メンションされているスレッドのみ）
             for msg in messages:
                 if msg.get("reply_count", 0) > 0:
-                    thread_replies = self._get_my_thread_replies(
-                        channel_id, channel_name, msg["ts"], since, until
-                    )
-                    my_messages.extend(thread_replies)
+                    is_my_thread = msg.get("user") == self.my_user_id
+                    is_mentioned = f"<@{self.my_user_id}>" in msg.get("text", "")
+                    if is_my_thread or is_mentioned:
+                        thread_replies = self._get_my_thread_replies(
+                            channel_id, channel_name, msg["ts"], since, until
+                        )
+                        my_messages.extend(thread_replies)
 
         except SlackApiError as e:
             if "not_in_channel" in str(e):

@@ -91,7 +91,6 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
     cfg_backlog = config["backlog"]
     cfg_slack = config["slack"]
     cfg_cal = config["google_calendar"]
-    cfg_claude = config.get("claude", {})
     cfg_report = config["report"]
 
     # ------------------------------------------------------------------ #
@@ -180,25 +179,15 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
     # 6. レポート生成
     # ------------------------------------------------------------------ #
     logger.info("\n--- レポート生成 ---")
-    generator = ReportGenerator(
-        claude_api_key=cfg_claude.get("api_key", ""),
-        claude_enabled=cfg_claude.get("enabled", False),
-        claude_model=cfg_claude.get("model", "claude-sonnet-4-6"),
-    )
+    generator = ReportGenerator()
 
     aggregated = generator.aggregate(
         backlog_activities, slack_messages, calendar_events, week_start, week_end
     )
 
-    # AI要約 or ルールベース要約
-    if cfg_claude.get("enabled") and cfg_claude.get("api_key"):
-        comment_text = generator.build_backlog_comment_with_ai(
-            aggregated, backlog_activities, slack_messages
-        )
-    else:
-        comment_text = generator.build_backlog_comment(
-            aggregated, meeting_docs=meeting_docs, gemini_client=gemini_client
-        )
+    comment_text = generator.build_backlog_comment(
+        aggregated, meeting_docs=meeting_docs, gemini_client=gemini_client
+    )
 
     # ローカル保存
     local_path = generator.save_local_report(aggregated, comment_text, cfg_report["output_dir"])
@@ -284,13 +273,8 @@ def run_daily_summary(config: dict) -> None:
     logger.info("=" * 60)
     logger.info("日次夕方サマリー 開始")
     backlog_client, slack_client = _make_clients(config)
-    cfg_claude = config.get("claude", {})
     cfg_gemini = config.get("gemini", {})
-    generator = ReportGenerator(
-        claude_api_key=cfg_claude.get("api_key", ""),
-        claude_enabled=False,
-        claude_model=cfg_claude.get("model", "claude-sonnet-4-6"),
-    )
+    generator = ReportGenerator()
     gemini_client = GeminiClient(
         api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
         model=cfg_gemini.get("model", "gemini-2.5-flash"),
