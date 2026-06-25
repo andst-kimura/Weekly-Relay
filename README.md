@@ -266,7 +266,7 @@ https://www.googleapis.com/auth/documents.readonly
 
 ### 7. Firestore の設定（GCP）
 
-Smart Sync と同じ GCP プロジェクト（`andst-hd-ax`）に `weekly-relay` DB を作成します。
+個人用 GCP プロジェクト（`weekly-relay`）に Named Database `weekly-relay` を作成します。DB 名を明示することで、将来 Smart Sync と同じプロジェクトへ統合する際も `smart-sync` DB と明確に区別できます。
 
 #### 7-1. gcloud CLI のセットアップ（未インストールの場合）
 
@@ -295,7 +295,7 @@ bash infra/setup_firestore.sh
 #### 7-3. `.env` に GCP 変数を追記
 
 ```env
-GOOGLE_CLOUD_PROJECT=andst-hd-ax
+GOOGLE_CLOUD_PROJECT=weekly-relay
 FIRESTORE_DATABASE=weekly-relay
 ```
 
@@ -304,8 +304,6 @@ FIRESTORE_DATABASE=weekly-relay
 ```bash
 gcloud auth application-default login
 ```
-
-> Smart Sync と同じ Google アカウントで認証済みであれば、このステップは不要な場合があります。
 
 ### 8. `config/config.yaml` の編集
 

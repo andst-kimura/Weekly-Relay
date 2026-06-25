@@ -100,11 +100,11 @@ google_calendar:
     - "primary"                             # メインカレンダー（追加カレンダーはIDを追加）
 
 # --- Firestore 設定 ---
-# Smart Sync と同じ GCP プロジェクト（andst-hd-ax）の別 DB を使用
+# 個人用 GCP プロジェクト（weekly-relay）の Firestore を使用
 firestore:
   enabled: true
-  # 環境変数で上書き可能（GCP_PROJECT / FIRESTORE_DATABASE）
-  project: "andst-hd-ax"
+  # 環境変数で上書き可能（GOOGLE_CLOUD_PROJECT / FIRESTORE_DATABASE）
+  project: "weekly-relay"
   database: "weekly-relay"
 
 # --- レポート設定 ---

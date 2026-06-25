@@ -3,14 +3,17 @@
 #
 # 実行前提:
 #   - gcloud CLI がインストール済みであること
-#   - andst-hd-ax プロジェクトへの編集権限があること（roles/datastore.owner 相当）
+#   - 個人用 GCP プロジェクト "weekly-relay" のオーナー権限があること
+#
+# DB 名を "weekly-relay" として Named Database で作成する。
+# 将来 andst-hd-ax プロジェクトへ統合する際も smart-sync DB と明確に区別できる。
 #
 # 実行方法（Git Bash / WSL）:
 #   bash infra/setup_firestore.sh
 #
 set -euo pipefail
 
-PROJECT_ID="andst-hd-ax"
+PROJECT_ID="weekly-relay"
 DB="weekly-relay"
 REGION="asia-northeast1"
 
@@ -31,19 +34,19 @@ else
   echo "  ✓ ADC 認証済み"
 fi
 
+gcloud config set project "${PROJECT_ID}"
+
 # ------------------------------------------------------------------ #
-# 2. Firestore API 有効化（未有効の場合のみ）
+# 2. Firestore API 有効化
 # ------------------------------------------------------------------ #
 echo ""
 echo "--- 2. Firestore API 有効化 ---"
 gcloud services enable firestore.googleapis.com \
-  --project="${PROJECT_ID}" 2>/dev/null \
+  --project="${PROJECT_ID}" \
   && echo "  ✓ firestore.googleapis.com"
 
 # ------------------------------------------------------------------ #
-# 3. Firestore DB 作成（weekly-relay）
-#    ※ andst-hd-ax の (default) DB は Smart Sync が使用中
-#      --type=firestore-native で Named Database として追加
+# 3. Firestore Named Database 作成（weekly-relay）
 # ------------------------------------------------------------------ #
 echo ""
 echo "--- 3. Firestore Database 作成: ${DB} ---"
@@ -92,7 +95,7 @@ echo "=== Setup Complete ==="
 echo ""
 echo "次のステップ:"
 echo "  1. .env に以下を追記する:"
-echo "       GOOGLE_CLOUD_PROJECT=andst-hd-ax"
+echo "       GOOGLE_CLOUD_PROJECT=weekly-relay"
 echo "       FIRESTORE_DATABASE=weekly-relay"
 echo ""
 echo "  2. 動作確認（ドライラン）:"

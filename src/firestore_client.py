@@ -1,6 +1,6 @@
 """
 Firestore クライアント
-Smart Sync と同じ GCP プロジェクト（andst-hd-ax）の weekly-relay DB を使用する。
+個人用 GCP プロジェクト（weekly-relay）の Firestore DB に接続する。
 接続はシングルトン（@lru_cache）で初期化を1回に抑える。
 """
 import os
@@ -19,7 +19,7 @@ _TTL_DAYS_CONTEXT = 30
 @lru_cache(maxsize=1)
 def _get_db() -> firestore.Client:
     db_name = os.environ.get("FIRESTORE_DATABASE", "weekly-relay")
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "andst-hd-ax")
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "weekly-relay")
     return firestore.Client(database=db_name, project=project)
 
 
