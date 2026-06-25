@@ -29,6 +29,7 @@ from src.daily_summary import DailySummary
 from src.google_docs_client import GoogleDocsClient
 from src.gemini_client import GeminiClient
 from src.cleanup import CleanupTool
+from src.firestore_client import FirestoreClient
 
 # ログ設定
 Path("output").mkdir(exist_ok=True)
@@ -81,6 +82,9 @@ def get_week_range(reference_dt: datetime = None) -> tuple[datetime, datetime]:
 
 def run_weekly_report(config: dict, reference_dt: datetime = None):
     """メイン処理: データ収集 → レポート生成 → Backlog転記"""
+    import time as _time
+    _started_at = _time.monotonic()
+
     logger.info("=" * 60)
     logger.info("Weekly Relay 開始")
     logger.info("=" * 60)
@@ -176,6 +180,18 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
     )
 
     # ------------------------------------------------------------------ #
+    # 5b. Firestore クライアント初期化
+    # ------------------------------------------------------------------ #
+    firestore_client = None
+    cfg_fs = config.get("firestore", {})
+    if cfg_fs.get("enabled", False):
+        try:
+            firestore_client = FirestoreClient()
+            logger.info("Firestore クライアント初期化完了")
+        except Exception as e:
+            logger.warning(f"Firestore 初期化失敗（ローカル出力にフォールバック）: {e}")
+
+    # ------------------------------------------------------------------ #
     # 6. レポート生成
     # ------------------------------------------------------------------ #
     logger.info("\n--- レポート生成 ---")
@@ -189,13 +205,21 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
         aggregated, meeting_docs=meeting_docs, gemini_client=gemini_client
     )
 
-    # ローカル保存
-    local_path = generator.save_local_report(aggregated, comment_text, cfg_report["output_dir"])
-    logger.info(f"ローカルレポート: {local_path}")
-
-    cal_path = generator.save_calendar_report(calendar_events, cfg_report["output_dir"])
-    if cal_path:
-        logger.info(f"カレンダーレポート: {cal_path}")
+    # Firestore へ保存
+    if firestore_client:
+        firestore_client.save_weekly_report(week_start, week_end, comment_text)
+        if calendar_events:
+            firestore_client.save_calendar_report(calendar_events[0]["start_dt"], "\n".join(
+                f"{ev['start_dt'].strftime('%Y/%m/%d %H:%M')} {ev['summary']} ({ev['duration_hours']}h)"
+                for ev in calendar_events
+            ))
+    else:
+        # Firestore 無効時はローカルファイルに保存
+        local_path = generator.save_local_report(aggregated, comment_text, cfg_report["output_dir"])
+        logger.info(f"ローカルレポート: {local_path}")
+        cal_path = generator.save_calendar_report(calendar_events, cfg_report["output_dir"])
+        if cal_path:
+            logger.info(f"カレンダーレポート: {cal_path}")
 
     # ------------------------------------------------------------------ #
     # 7. Backlog 転記
@@ -225,13 +249,21 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
         kb = KnowledgeBase(
             backlog_client=backlog_client,
             slack_client=slack_client,
-            output_dir=cfg_kb.get("output_dir", "output/knowledge"),
             gemini_client=gemini_client,
+            firestore_client=firestore_client,
         )
         kb.generate(backlog_activities, week_start, week_end, meeting_docs=meeting_docs)
 
-    logger.info("\n✅ Weekly Relay 完了")
+    duration = _time.monotonic() - _started_at
+    logger.info(f"\n✅ Weekly Relay 完了（所要時間: {duration:.1f}秒）")
     logger.info("=" * 60)
+
+    if firestore_client:
+        firestore_client.write_sync_log(
+            status="success", job="weekly_report",
+            detail=f"backlog={len(backlog_activities)}, slack={len(slack_messages)}, meetings={len(meeting_docs)}",
+            duration_sec=round(duration, 1),
+        )
 
 
 def _make_clients(config: dict) -> tuple[BacklogClient, SlackClient]:

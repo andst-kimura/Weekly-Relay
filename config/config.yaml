@@ -99,13 +99,13 @@ google_calendar:
   calendar_ids:
     - "primary"                             # メインカレンダー（追加カレンダーはIDを追加）
 
-# --- Claude API 設定（要約機能） ---
-# 組織管理者から権限が付与されている場合のみ使用
-# 未設定の場合はルールベースの要約にフォールバック
-claude:
-  api_key: ""                               # AnthropicダッシュボードからAPIキーを取得
-  enabled: false                            # trueにするとAI要約を使用
-  model: "claude-sonnet-4-6"
+# --- Firestore 設定 ---
+# Smart Sync と同じ GCP プロジェクト（andst-hd-ax）の別 DB を使用
+firestore:
+  enabled: true
+  # 環境変数で上書き可能（GCP_PROJECT / FIRESTORE_DATABASE）
+  project: "andst-hd-ax"
+  database: "weekly-relay"
 
 # --- レポート設定 ---
 report:
@@ -128,7 +128,8 @@ schedule:
 # --- ナレッジベース設定 ---
 knowledge_base:
   enabled: true
-  output_dir: "output/knowledge"     # チケット別・Slack別Markdownの出力先
+  # output_dir は Firestore 有効時は未使用（後方互換のため残す）
+  output_dir: "output/knowledge"
 
 # --- 未対応チケット警告設定 ---
 ticket_alert:

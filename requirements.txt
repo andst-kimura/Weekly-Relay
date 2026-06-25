@@ -14,3 +14,4 @@ schedule>=1.2.1
 python-dateutil>=2.9.0
 pytz>=2024.1
 google-genai>=1.0.0
+google-cloud-firestore>=2.16.0
