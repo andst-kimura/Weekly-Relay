@@ -122,6 +122,27 @@ slack_bot:
     project_key: "SALES_TEAM"
     # 種別ID（共有事項）: python main.py --check-issue-types で確認
     issue_type_id: 915353
+  # Bot を招待済みのチャンネル一覧（管理用メモ。コードからは参照しない）
+  # チャンネルへの招待: /invite @Wasabi Bot
+  # チャンネルから退出: /kick @Wasabi Bot または Slack チャンネル設定から削除
+  joined_channels:
+    - 販売チームV2
+    - 販売チーム_hblab
+    - prj_mobilepos
+    - 販売チーム_all
+    - 販売チーム_ncr
+    - 販売チーム_ビジサク
+    - 販売チーム_pdc
+    - 販売チーム_sts
+    - 販売コーポレートチーム
+    - 販売チーム_フィジオ
+    - 販売チーム_インフラ
+    - 販売_データ
+    - 販売_ガバナンス
+    - pjt_顧客カルテ02
+    - シン-オープン化-
+    - バリューチェーンdx推進_all
+    - 販売チーム_物流
 
 # --- Google Calendar 設定 ---
 google_calendar:
