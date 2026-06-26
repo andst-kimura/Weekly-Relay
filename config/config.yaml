@@ -35,14 +35,29 @@ slack:
       project_key: "NEW_STORE_APP"
       parent_issue_key: "SALES_TEAM-27"
       label: "ストアアプリ（STORE APP）"
+      related_meeting_keywords:
+        - "ストアアプリ"
+        - "スマエージェント"
+        - "hblab"
+        - "店舗ACE"
+        - "Firebase"
     prj_mobilepos:
       project_key: "MOBILEPOS"
       parent_issue_key: "SALES_TEAM-23"
       label: "モバイルPOS"
+      related_meeting_keywords:
+        - "ポスタス"
+        - "MobilePOS"
+        - "Mobile POS"
+        - "催事"
+        - "POS+"
     販売チーム_pdc:
       project_key: "SIGNAGE"
       parent_issue_key: "SALES_TEAM-256"
       label: "PDC/サイネージ"
+      related_meeting_keywords:
+        - "サイネージ"
+        - "PDC"
 
     # 親課題なし（レポートには記載するが転記は新規起票）
     販売チーム_ncr:

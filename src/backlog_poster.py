@@ -76,7 +76,7 @@ class BacklogPoster:
     def _build_comment(self, issue_key: str, issue_summary: str,
                         backlog_acts: list, slack_msgs: list, meeting_docs: list,
                         aggregated: dict, generator, gemini_client,
-                        tag: str = "") -> str:
+                        tag: str = "", issue_keywords: list[str] = None) -> str:
         """build_status_next_action を呼び出してコメント本文を返す"""
         footer_extra = f"（{tag}）" if tag else ""
         body = generator.build_status_next_action(
@@ -87,6 +87,7 @@ class BacklogPoster:
             week_end=aggregated["week_end"],
             issue_summary=f"{issue_key}: {issue_summary}",
             gemini_client=gemini_client,
+            issue_keywords=issue_keywords,
         )
         # 末尾のフッターにタグを追加
         if tag:
@@ -195,9 +196,15 @@ class BacklogPoster:
             for rc in related_channels:
                 rel_msgs.extend(slack_by_channel.get(rc, []))
 
+            # related_meeting_keywords が設定されていれば議事録をキーワードで事前絞り込み
+            meeting_keywords = mapping.get("related_meeting_keywords", [])
+            candidate_docs = (
+                self._filter_docs_by_keywords(valid_meeting_docs, meeting_keywords)
+                if meeting_keywords else valid_meeting_docs
+            )
             # この親課題に関連する議事録のみ渡す（Geminiで個別分類）
             rel_docs = self._classify_docs_for_issue(
-                valid_meeting_docs, parent_key, parent_summary, gemini_client
+                candidate_docs, parent_key, parent_summary, gemini_client
             )
 
             logger.info(f"#{channel} → {parent_key} に転記（関連PJ: {project_keys}, 議事録: {len(rel_docs)} 件）")
@@ -205,6 +212,7 @@ class BacklogPoster:
                 parent_key, parent_summary,
                 rel_acts, rel_msgs, rel_docs,
                 aggregated, generator, gemini_client,
+                issue_keywords=meeting_keywords or None,
             )
             results.append(self._post_comment(parent_key, comment))
             posted_issue_keys.add(parent_key)
@@ -312,6 +320,26 @@ class BacklogPoster:
             return resolved
 
         return None
+
+    # ------------------------------------------------------------------ #
+    #  議事録のキーワードフィルタ
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _filter_docs_by_keywords(meeting_docs: list[dict], keywords: list[str]) -> list[dict]:
+        """議事録タイトル・要約・本文先頭にキーワードが含まれるものだけ返す"""
+        if not keywords:
+            return meeting_docs
+        result = []
+        for doc in meeting_docs:
+            haystack = (
+                doc.get("title", "") + " "
+                + (doc.get("_summary") or "")[:300] + " "
+                + (doc.get("text") or "")[:200]
+            ).lower()
+            if any(kw.lower() in haystack for kw in keywords):
+                result.append(doc)
+        return result
 
     # ------------------------------------------------------------------ #
     #  議事録の事前一括分類（Gemini 呼び出し M×N → M に削減）

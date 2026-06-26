@@ -314,10 +314,12 @@ class ReportGenerator:
         week_end: datetime,
         issue_summary: str = "",
         gemini_client=None,
+        issue_keywords: list[str] = None,
     ) -> str:
         """
         =Status= / =NextAction= フォーマットのBacklogコメントを生成する。
         Gemini が有効な場合は AI 整形、無効な場合はルールベースにフォールバック。
+        issue_keywords: 全体MTGの要約から関連行を絞り込むキーワード
         """
         w_start = week_start.strftime("%Y/%m/%d")
         w_end = week_end.strftime("%Y/%m/%d")
@@ -326,7 +328,8 @@ class ReportGenerator:
 
         if gemini_client and gemini_client.enabled:
             sources_text = self._build_sources_text(
-                backlog_acts, slack_msgs, meeting_docs, w_start, w_end
+                backlog_acts, slack_msgs, meeting_docs, w_start, w_end,
+                issue_keywords=issue_keywords,
             )
             formatted = gemini_client.format_backlog_comment(sources_text, issue_summary)
             if formatted:
@@ -344,8 +347,12 @@ class ReportGenerator:
         meeting_docs: list[dict],
         w_start: str,
         w_end: str,
+        issue_keywords: list[str] = None,
     ) -> str:
-        """Gemini に渡すデータソーステキストを構築する"""
+        """Gemini に渡すデータソーステキストを構築する。
+        issue_keywords が指定された場合、議事録の要約を行単位でフィルタし
+        キーワード関連行のみを渡す（全体MTGの無関係議題混入を防ぐ）。
+        """
         lines = [f"対象期間: {w_start}〜{w_end}", ""]
 
         if backlog_acts:
@@ -376,12 +383,56 @@ class ReportGenerator:
             lines.append("【議事録】")
             for doc in meeting_docs:
                 lines.append(f"- [{doc['created_date']}] {doc['title']}")
-                excerpt = (doc.get("text") or "")[:400].replace("\n", " ")
-                if excerpt:
-                    lines.append(f"  内容: {excerpt}")
+                summary = doc.get("_summary") or ""
+                if summary:
+                    filtered = self._filter_summary_lines(summary, issue_keywords)
+                    if filtered:
+                        lines.append(f"  要約（関連抜粋）: {filtered[:800].replace(chr(10), ' ')}")
+                    else:
+                        # キーワード一致なし → 要約全体を渡してGeminiに判断させる
+                        lines.append(f"  要約: {summary[:800].replace(chr(10), ' ')}")
+                else:
+                    excerpt = (doc.get("text") or "")[:600].replace("\n", " ")
+                    if excerpt:
+                        lines.append(f"  内容: {excerpt}")
             lines.append("")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _filter_summary_lines(summary: str, keywords: list[str] = None) -> str:
+        """議事録要約をキーワードで行フィルタし、関連行のみ返す。
+        キーワード未指定の場合は全文をそのまま返す。
+        セクションヘッダ行（##で始まる行）はキーワード関連行があれば一緒に含める。
+        """
+        if not keywords:
+            return summary
+        kws = [k.lower() for k in keywords]
+        result_lines = []
+        current_section_header = ""
+        section_has_match = False
+        pending_header = ""
+
+        for line in summary.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                # 新セクション開始
+                current_section_header = line
+                pending_header = line
+                section_has_match = False
+                continue
+            # キーワード一致判定
+            if any(kw in stripped.lower() for kw in kws):
+                if pending_header:
+                    result_lines.append(pending_header)
+                    pending_header = ""
+                result_lines.append(line)
+                section_has_match = True
+            # テーブル行（|で始まる）は直前の一致行がある場合のみ追加
+            elif stripped.startswith("|") and section_has_match:
+                result_lines.append(line)
+
+        return "\n".join(result_lines)
 
     def _rule_based_status(
         self,
