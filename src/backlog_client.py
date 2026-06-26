@@ -240,15 +240,25 @@ class BacklogClient:
         return self._request_with_retry("DELETE", url, params={"apiKey": self.api_key}).json()
 
     def create_issue(self, project_id: int, summary: str, description: str,
-                     issue_type_id: int, priority_id: int = 3) -> dict:
-        """新規課題を作成"""
-        return self._post("issues", {
+                     issue_type_id: int, priority_id: int = 3,
+                     assignee_id: int = None, due_date: str = None) -> dict:
+        """新規課題を作成。due_date は 'YYYY-MM-DD' 形式。"""
+        data = {
             "projectId": project_id,
             "summary": summary,
             "issueTypeId": issue_type_id,
             "priorityId": priority_id,
             "description": description,
-        })
+        }
+        if assignee_id:
+            data["assigneeId"] = assignee_id
+        if due_date:
+            data["dueDate"] = due_date
+        return self._post("issues", data)
+
+    def get_project_users(self, project_id_or_key: str) -> list[dict]:
+        """プロジェクトメンバー一覧を取得"""
+        return self._get(f"projects/{project_id_or_key}/users")
 
     def get_issue_types(self, project_id: int) -> list[dict]:
         """プロジェクトの課題種別を取得"""

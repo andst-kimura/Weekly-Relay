@@ -292,6 +292,34 @@ class FirestoreClient:
             return []
 
     # ------------------------------------------------------------------ #
+    #  shared_infos
+    # ------------------------------------------------------------------ #
+
+    def save_shared_info(self, issue_key: str, summary: str, body: str,
+                          slack_user_id: str = "", channel: str = "",
+                          due_date: str = "") -> str:
+        """共有事項（Backlog 起票済み）を shared_infos コレクションに保存する"""
+        try:
+            now = datetime.now(timezone.utc)
+            ts_ms = int(now.timestamp() * 1000)
+            doc_id = f"shared_{now.strftime('%Y%m%d')}_{ts_ms}"
+            _set_doc("shared_infos", doc_id, {
+                "issue_key": issue_key,
+                "summary": summary,
+                "body": body,
+                "slack_user_id": slack_user_id,
+                "channel": channel,
+                "due_date": due_date,
+                "created_at": now,
+                "week_key": now.strftime("%Y%W"),
+            })
+            logger.info(f"共有事項保存: {doc_id} issue={issue_key}")
+            return doc_id
+        except Exception as e:
+            logger.warning(f"共有事項保存失敗: {e}")
+            return ""
+
+    # ------------------------------------------------------------------ #
     #  sync_logs
     # ------------------------------------------------------------------ #
 

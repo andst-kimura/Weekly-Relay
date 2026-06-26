@@ -116,6 +116,12 @@ slack_bot:
   app_token: "${SLACK_APP_TOKEN}"
   # 1回の質問で参照する KB ドキュメント数（多いほど精度↑、速度↓）
   n_results: 5
+  # 共有事項コマンド設定
+  shared_info:
+    # 起票先プロジェクトキー（省略時は backlog.report_project_key を使用）
+    project_key: "SALES_TEAM"
+    # 種別ID（共有事項）: python main.py --check-issue-types で確認
+    issue_type_id: 915353
 
 # --- Google Calendar 設定 ---
 google_calendar:

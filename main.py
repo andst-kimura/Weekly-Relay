@@ -716,6 +716,32 @@ def main():
         vs = VectorStore(embed_fn=gemini.embed)
         cfg_fs = config.get("firestore", {})
         fs_client = FirestoreClient() if cfg_fs.get("enabled", False) else None
+
+        # Backlog クライアント（共有事項起票用）
+        cfg_bl = config.get("backlog", {})
+        bl_client = BacklogClient(
+            base_url=cfg_bl.get("base_url", ""),
+            api_key=cfg_bl.get("api_key", ""),
+            my_user_id=cfg_bl.get("my_user_id", 0),
+        )
+
+        # Slack user_id → Backlog user_id マッピング（myself + team_members）
+        slack_to_backlog: dict[str, int] = {}
+        my_slack_id = cfg_slack.get("my_user_id", "")
+        my_backlog_id = cfg_bl.get("my_user_id", 0)
+        if my_slack_id and my_backlog_id:
+            slack_to_backlog[my_slack_id] = my_backlog_id
+        for member in config.get("team_members", []):
+            s_id = member.get("slack_user_id", "")
+            b_id = member.get("backlog_user_id", 0)
+            if s_id and b_id:
+                slack_to_backlog[s_id] = b_id
+
+        # 共有事項設定
+        shared_info_cfg = cfg_bot.get("shared_info", {})
+        if not shared_info_cfg.get("project_key"):
+            shared_info_cfg["project_key"] = cfg_bl.get("report_project_key", "SALES_TEAM")
+
         bot = SlackBot(
             bot_token=bot_token,
             app_token=app_token,
@@ -723,6 +749,9 @@ def main():
             gemini_client=gemini,
             n_results=n_results,
             firestore_client=fs_client,
+            backlog_client=bl_client,
+            shared_info_cfg=shared_info_cfg,
+            slack_user_to_backlog=slack_to_backlog,
         )
         bot.run()
         return
