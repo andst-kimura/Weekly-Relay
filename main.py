@@ -251,6 +251,7 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
             comment_text, backlog_activities, slack_messages, week_start, week_end,
             aggregated=aggregated, generator=generator,
             meeting_docs=meeting_docs, gemini_client=gemini_client,
+            firestore_client=firestore_client,
         )
         for r in results:
             logger.info(f"転記結果: {r}")
@@ -713,12 +714,15 @@ def main():
         from src.vector_store import VectorStore
         from src.slack_bot import SlackBot
         vs = VectorStore(embed_fn=gemini.embed)
+        cfg_fs = config.get("firestore", {})
+        fs_client = FirestoreClient() if cfg_fs.get("enabled", False) else None
         bot = SlackBot(
             bot_token=bot_token,
             app_token=app_token,
             vector_store=vs,
             gemini_client=gemini,
             n_results=n_results,
+            firestore_client=fs_client,
         )
         bot.run()
         return

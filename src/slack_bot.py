@@ -7,9 +7,10 @@ Socket Mode で動作するため、パブリック URL 不要。
   - app_mention: チャンネル内でメンションされた質問
   - message (im): DM で送られた質問
 
-削除コマンド:
-  チャンネル: Bot の返信スレッド内で「@Weekly Relay delete」と送信
-  DM        : 「delete」とだけ送信
+コマンド一覧:
+  質問    : @Weekly Relay ACE刷新の進捗は？
+  進捗メモ: @Weekly Relay メモ [ISSUE-KEY]: 内容
+  削除    : 返信スレッドで @Weekly Relay delete
 """
 import logging
 import re
@@ -17,19 +18,26 @@ import re
 logger = logging.getLogger(__name__)
 
 _DELETE_COMMANDS = {"delete", "削除", "del", "消して", "消去"}
+# メモコマンドのプレフィックス
+_MEMO_PREFIXES = ("メモ", "memo", "進捗メモ", "手動メモ", "進捗入力")
+# 課題キーのパターン（例: SALES_TEAM-23, MOBILEPOS-45）
+_ISSUE_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
 
 _HELP_TEXT = """\
 *Weekly Relay KB アシスタント* にようこそ！
-チケット・Slack・議事録の KB を検索して回答します。
 
-*使い方（チャンネル内）*
+*質問（KB 検索 + AI 回答）*
 　`@Weekly Relay ACE刷新の進捗は？`
 
-*Bot の返信を削除したいとき（チャンネル）*
+*進捗メモの登録（週次レポートの情報源に追加）*
+　`@Weekly Relay メモ SALES_TEAM-23: ポスタスのエラーは解消済み。6/27本番反映予定`
+　`@Weekly Relay メモ ポスタスの検証環境のエラーが解消した`（課題キー省略可）
+
+*Bot 返信の削除（チャンネル）*
 　返信スレッド内で `@Weekly Relay delete` と送信
 
 *使い方（DM）*
-　質問をそのまま送信。削除は `delete` と送信。
+　上記コマンドをメンションなしで送信。削除は `delete` と入力。
 
 KB が空の場合は `python main.py --only kb` を実行してインデックスを更新してください。
 """
@@ -39,16 +47,55 @@ class SlackBot:
     """Socket Mode で動作する KB 質問応答 Bot"""
 
     def __init__(self, bot_token: str, app_token: str, vector_store, gemini_client,
-                 n_results: int = 5):
+                 n_results: int = 5, firestore_client=None):
         self._bot_token = bot_token
         self._app_token = app_token
         self.vs = vector_store
         self.gemini = gemini_client
         self.n_results = n_results
+        self.fs = firestore_client
         self._bot_user_id: str = ""
         # thread_ts → bot が投稿した返信の ts（削除用）
         # DM は channel_id → bot が投稿した最新 ts
         self._reply_ts: dict[str, str] = {}
+
+    def _handle_memo(self, raw_text: str, user: str, channel: str) -> str:
+        """メモコマンドを解析して Firestore に保存し、確認メッセージを返す"""
+        # プレフィックスを除去
+        text = raw_text
+        for prefix in _MEMO_PREFIXES:
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].lstrip(" 　:：")
+                break
+
+        # 課題キーを抽出
+        issue_key = ""
+        m = _ISSUE_KEY_RE.search(text)
+        if m:
+            issue_key = m.group(1)
+            # 課題キーと直後の区切り文字を除去
+            text = _ISSUE_KEY_RE.sub("", text, count=1).lstrip(" 　:：").strip()
+
+        if not text:
+            return "メモの内容を入力してください。\n例: `@Weekly Relay メモ SALES_TEAM-23: 内容`"
+
+        if self.fs:
+            self.fs.save_manual_memo(
+                text=text,
+                parent_issue_key=issue_key,
+                created_by=user,
+                channel=channel,
+            )
+            issue_label = issue_key if issue_key else "未指定（週次レポート実行時に関連課題へ自動追加）"
+            return (
+                f"✅ 進捗メモを保存しました\n"
+                f"・課題: {issue_label}\n"
+                f"・内容: {text}\n"
+                f"次の週次レポート実行時に情報源として使用されます。"
+            )
+        else:
+            logger.warning(f"手動メモ: Firestore 未設定のため保存スキップ（{text}）")
+            return "⚠️ Firestore が設定されていないため保存できませんでした。"
 
     def _search_and_answer(self, query: str) -> str:
         """クエリを KB 検索 → Gemini で回答生成"""
@@ -112,6 +159,12 @@ class SlackBot:
                 say(text=_HELP_TEXT, thread_ts=event.get("ts"))
                 return
 
+            # メモコマンド
+            if any(text.lower().startswith(p.lower()) for p in _MEMO_PREFIXES):
+                reply = self._handle_memo(text, event.get("user", ""), event["channel"])
+                say(text=reply, thread_ts=event.get("ts"))
+                return
+
             logger.info(f"Slack Bot メンション受信: {text}")
             answer = self._search_and_answer(text)
             # スレッドに返信し、ts を記録
@@ -148,6 +201,12 @@ class SlackBot:
 
             if text in ("help", "ヘルプ", "?", "？"):
                 say(_HELP_TEXT)
+                return
+
+            # メモコマンド（DM）
+            if any(text.lower().startswith(p.lower()) for p in _MEMO_PREFIXES):
+                reply = self._handle_memo(text, event.get("user", ""), event["channel"])
+                say(reply)
                 return
 
             logger.info(f"Slack Bot DM受信: {text}")

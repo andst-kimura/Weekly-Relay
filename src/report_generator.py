@@ -315,6 +315,7 @@ class ReportGenerator:
         issue_summary: str = "",
         gemini_client=None,
         issue_keywords: list[str] = None,
+        manual_memos: list[dict] = None,
     ) -> str:
         """
         =Status= / =NextAction= フォーマットのBacklogコメントを生成する。
@@ -330,6 +331,7 @@ class ReportGenerator:
             sources_text = self._build_sources_text(
                 backlog_acts, slack_msgs, meeting_docs, w_start, w_end,
                 issue_keywords=issue_keywords,
+                manual_memos=manual_memos,
             )
             formatted = gemini_client.format_backlog_comment(sources_text, issue_summary)
             if formatted:
@@ -348,6 +350,7 @@ class ReportGenerator:
         w_start: str,
         w_end: str,
         issue_keywords: list[str] = None,
+        manual_memos: list[dict] = None,
     ) -> str:
         """Gemini に渡すデータソーステキストを構築する。
         issue_keywords が指定された場合、議事録の要約を行単位でフィルタし
@@ -377,6 +380,17 @@ class ReportGenerator:
                 date = msg["datetime"].strftime("%m/%d %H:%M")
                 text = (msg.get("text") or "")[:100].replace("\n", " ")
                 lines.append(f"- [{date}] #{msg.get('channel_name','')}: {text}")
+            lines.append("")
+
+        if manual_memos:
+            lines.append("【手動メモ（担当者入力）】")
+            for memo in manual_memos:
+                created = (memo.get("created_at") or "")
+                if hasattr(created, "strftime"):
+                    date_str = created.strftime("%m/%d %H:%M")
+                else:
+                    date_str = str(created)[:16]
+                lines.append(f"- [{date_str}] {memo.get('text', '')}")
             lines.append("")
 
         if meeting_docs:

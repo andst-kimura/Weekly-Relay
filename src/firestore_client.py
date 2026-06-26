@@ -233,6 +233,65 @@ class FirestoreClient:
 
 
     # ------------------------------------------------------------------ #
+    #  manual_memos（Slack Bot 手動メモ）
+    # ------------------------------------------------------------------ #
+
+    def save_manual_memo(self, text: str, parent_issue_key: str = "",
+                          created_by: str = "", channel: str = "") -> str:
+        """手動メモを manual_memos コレクションに保存してドキュメントIDを返す"""
+        try:
+            now = datetime.now(timezone.utc)
+            ts_ms = int(now.timestamp() * 1000)
+            doc_id = f"memo_{now.strftime('%Y%m%d')}_{ts_ms}"
+            _set_doc("manual_memos", doc_id, {
+                "text": text,
+                "parent_issue_key": parent_issue_key,
+                "created_by": created_by,
+                "channel": channel,
+                "created_at": now,
+                "week_key": now.strftime("%Y%W"),
+            })
+            logger.info(f"手動メモ保存: {doc_id} parent={parent_issue_key or '未指定'}")
+            return doc_id
+        except Exception as e:
+            logger.warning(f"手動メモ保存失敗: {e}")
+            return ""
+
+    def get_manual_memos(self, since: datetime, until: datetime) -> list[dict]:
+        """指定期間に作成された手動メモを返す"""
+        try:
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT", "weekly-relay")
+            database = os.environ.get("FIRESTORE_DATABASE", "weekly-relay")
+            url = _col_path(project, database, "manual_memos")
+            results = []
+            params: dict = {"pageSize": 200}
+            while True:
+                resp = _get_session().get(url, params=params, timeout=30)
+                resp.raise_for_status()
+                body = resp.json()
+                for doc in body.get("documents", []):
+                    data = _doc_to_dict(doc)
+                    if not data:
+                        continue
+                    created_at = data.get("created_at")
+                    if isinstance(created_at, datetime):
+                        if since.tzinfo and created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=timezone.utc)
+                        elif not since.tzinfo and created_at.tzinfo:
+                            created_at = created_at.replace(tzinfo=None)
+                        if since <= created_at <= until:
+                            results.append(data)
+                page_token = body.get("nextPageToken")
+                if not page_token:
+                    break
+                params["pageToken"] = page_token
+            logger.info(f"手動メモ取得: {len(results)} 件（{since.date()}〜{until.date()}）")
+            return results
+        except Exception as e:
+            logger.warning(f"手動メモ取得失敗: {e}")
+            return []
+
+    # ------------------------------------------------------------------ #
     #  sync_logs
     # ------------------------------------------------------------------ #
 

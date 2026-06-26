@@ -76,7 +76,8 @@ class BacklogPoster:
     def _build_comment(self, issue_key: str, issue_summary: str,
                         backlog_acts: list, slack_msgs: list, meeting_docs: list,
                         aggregated: dict, generator, gemini_client,
-                        tag: str = "", issue_keywords: list[str] = None) -> str:
+                        tag: str = "", issue_keywords: list[str] = None,
+                        manual_memos: list[dict] = None) -> str:
         """build_status_next_action を呼び出してコメント本文を返す"""
         footer_extra = f"（{tag}）" if tag else ""
         body = generator.build_status_next_action(
@@ -88,6 +89,7 @@ class BacklogPoster:
             issue_summary=f"{issue_key}: {issue_summary}",
             gemini_client=gemini_client,
             issue_keywords=issue_keywords,
+            manual_memos=manual_memos,
         )
         # 末尾のフッターにタグを追加
         if tag:
@@ -101,11 +103,22 @@ class BacklogPoster:
                             slack_messages: list[dict], week_start, week_end,
                             aggregated: dict = None, generator=None,
                             meeting_docs: list[dict] = None,
-                            gemini_client=None) -> list[dict]:
+                            gemini_client=None,
+                            firestore_client=None) -> list[dict]:
         from src.gemini_client import is_empty_meeting_doc
 
         results = []
         posted_issue_keys: set[str] = set()
+
+        # 手動メモ（Slack Bot 経由）を Firestore から取得
+        all_manual_memos: list[dict] = []
+        if firestore_client:
+            try:
+                all_manual_memos = firestore_client.get_manual_memos(week_start, week_end)
+                if all_manual_memos:
+                    logger.info(f"手動メモ: {len(all_manual_memos)} 件を取得")
+            except Exception as e:
+                logger.warning(f"手動メモ取得失敗（スキップ）: {e}")
 
         # 有効な議事録のみ使用（Gemini生成失敗の空ドキュメントを除外）
         valid_meeting_docs = [d for d in (meeting_docs or []) if not is_empty_meeting_doc(d)]
@@ -207,12 +220,14 @@ class BacklogPoster:
                 candidate_docs, parent_key, parent_summary, gemini_client
             )
 
-            logger.info(f"#{channel} → {parent_key} に転記（関連PJ: {project_keys}, 議事録: {len(rel_docs)} 件）")
+            rel_memos = self._filter_memos_for_issue(all_manual_memos, parent_key)
+            logger.info(f"#{channel} → {parent_key} に転記（関連PJ: {project_keys}, 議事録: {len(rel_docs)} 件, 手動メモ: {len(rel_memos)} 件）")
             comment = self._build_comment(
                 parent_key, parent_summary,
                 rel_acts, rel_msgs, rel_docs,
                 aggregated, generator, gemini_client,
                 issue_keywords=meeting_keywords or None,
+                manual_memos=rel_memos or None,
             )
             results.append(self._post_comment(parent_key, comment))
             posted_issue_keys.add(parent_key)
@@ -247,11 +262,13 @@ class BacklogPoster:
             rel_docs = self._classify_docs_for_issue(
                 valid_meeting_docs, parent_key, parent_issue.get("summary", ""), gemini_client
             )
-            logger.info(f"Backlog活動を {parent_key} に転記（課題 {len(acts)} 件, 議事録 {len(rel_docs)} 件）")
+            rel_memos = self._filter_memos_for_issue(all_manual_memos, parent_key)
+            logger.info(f"Backlog活動を {parent_key} に転記（課題 {len(acts)} 件, 議事録 {len(rel_docs)} 件, 手動メモ: {len(rel_memos)} 件）")
             comment = self._build_comment(
                 parent_key, parent_issue.get("summary", ""),
                 acts, [], rel_docs,
                 aggregated, generator, gemini_client,
+                manual_memos=rel_memos or None,
             )
             results.append(self._post_comment(parent_key, comment))
             posted_issue_keys.add(parent_key)
@@ -320,6 +337,23 @@ class BacklogPoster:
             return resolved
 
         return None
+
+    # ------------------------------------------------------------------ #
+    #  手動メモのフィルタ（親課題キー一致 or 未指定）
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _filter_memos_for_issue(all_memos: list[dict], parent_issue_key: str) -> list[dict]:
+        """
+        手動メモのうち、指定した親課題キーに対応するものを返す。
+        parent_issue_key が空（未指定）のメモはすべての親課題に含める。
+        """
+        result = []
+        for memo in all_memos:
+            memo_key = memo.get("parent_issue_key", "")
+            if not memo_key or memo_key == parent_issue_key:
+                result.append(memo)
+        return result
 
     # ------------------------------------------------------------------ #
     #  議事録のキーワードフィルタ
