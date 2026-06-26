@@ -320,7 +320,7 @@ class GeminiClient:
         if not self.enabled:
             raise RuntimeError("Gemini API が無効です（embed には API キーが必要）")
         result = self._client.models.embed_content(
-            model="models/text-embedding-004",
+            model="models/gemini-embedding-001",
             contents=text,
         )
         return list(result.embeddings[0].values)
