@@ -119,6 +119,10 @@ class BacklogPoster:
                     logger.info(f"手動メモ: {len(all_manual_memos)} 件を取得")
             except Exception as e:
                 logger.warning(f"手動メモ取得失敗（スキップ）: {e}")
+        # キー未指定メモを Gemini で親課題に振り分け（後続の _filter_memos_for_issue の前に実施）
+        # 振り分けには親課題一覧が必要なため、_raw_parents_cache が構築された後に再実行する
+        # → 事前分類ブロックの後で呼ぶため、ここでは unkeyed のみ仮フラグとして記録
+        _memos_need_assign = any(not m.get("parent_issue_key", "") for m in all_manual_memos)
 
         # 有効な議事録のみ使用（Gemini生成失敗の空ドキュメントを除外）
         valid_meeting_docs = [d for d in (meeting_docs or []) if not is_empty_meeting_doc(d)]
@@ -165,6 +169,18 @@ class BacklogPoster:
                 self._precompute_doc_classification(
                     valid_meeting_docs, all_parent_issues, gemini_client
                 )
+
+            # キー未指定の手動メモを Gemini で親課題に振り分け
+            if _memos_need_assign and all_manual_memos:
+                all_manual_memos = self._assign_memo_parent_keys(
+                    all_manual_memos, all_parent_issues, gemini_client
+                )
+
+        # Gemini 無効またはキー未指定メモが残っている場合のフォールバック振り分け
+        if _memos_need_assign and any(not m.get("parent_issue_key", "") for m in all_manual_memos):
+            all_manual_memos = self._assign_memo_parent_keys(
+                all_manual_memos, [], gemini_client  # parent_issues 空 → 転記対象外に落とす
+            )
 
         # ------------------------------------------------------------------ #
         # ① channel_mapping で明示指定された親課題に転記
@@ -339,20 +355,57 @@ class BacklogPoster:
         return None
 
     # ------------------------------------------------------------------ #
-    #  手動メモのフィルタ（親課題キー一致 or 未指定）
+    #  手動メモのフィルタ（親課題キー一致のみ）
     # ------------------------------------------------------------------ #
 
     @staticmethod
     def _filter_memos_for_issue(all_memos: list[dict], parent_issue_key: str) -> list[dict]:
         """
-        手動メモのうち、指定した親課題キーに対応するものを返す。
-        parent_issue_key が空（未指定）のメモはすべての親課題に含める。
+        手動メモのうち、parent_issue_key が一致するものだけを返す。
+        キー未指定メモは事前に _assign_memo_parent_keys() で振り分け済みのため除外。
+        """
+        return [m for m in all_memos if m.get("parent_issue_key", "") == parent_issue_key]
+
+    def _assign_memo_parent_keys(
+        self,
+        memos: list[dict],
+        parent_issues: list[dict],
+        gemini_client,
+    ) -> list[dict]:
+        """
+        parent_issue_key が空のメモを Gemini で親課題に振り分ける。
+        キーが既に設定されているメモはそのまま返す。
+        振り分け不能なメモは結果リストから除外する（全親課題へのばら撒きを防ぐ）。
+        parent_issues: [{"issue_key": "SALES_TEAM-23", "summary": "..."}, ...]
         """
         result = []
-        for memo in all_memos:
-            memo_key = memo.get("parent_issue_key", "")
-            if not memo_key or memo_key == parent_issue_key:
+        unkeyed = []
+        for memo in memos:
+            if memo.get("parent_issue_key", ""):
                 result.append(memo)
+            else:
+                unkeyed.append(memo)
+
+        if not unkeyed:
+            return result
+
+        if not (gemini_client and gemini_client.enabled) or not parent_issues:
+            logger.info(
+                f"手動メモ {len(unkeyed)} 件はキー未指定かつ Gemini 無効のため転記対象外"
+            )
+            return result
+
+        for memo in unkeyed:
+            text = memo.get("text", "")
+            detected = gemini_client.detect_parent_issue(text, parent_issues)
+            if detected:
+                memo = dict(memo)
+                memo["parent_issue_key"] = detected
+                result.append(memo)
+                logger.info(f"手動メモ自動振り分け: '{text[:40]}' → {detected}")
+            else:
+                logger.info(f"手動メモ振り分け不能（転記対象外）: '{text[:40]}'")
+
         return result
 
     # ------------------------------------------------------------------ #
