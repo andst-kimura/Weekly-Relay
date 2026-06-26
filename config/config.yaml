@@ -123,19 +123,6 @@ slack_bot:
     # 種別ID（共有事項）: python main.py --check-issue-types で確認
     issue_type_id: 915353
 
-# --- Gmail 設定（Bot コマンド「請求書」「未返信チェック」用）---
-gmail:
-  # 自分のメールアドレス（未返信判定で使用）
-  my_email: "ta.kimura@andst-hd.co.jp"
-  # 請求書の既知送信元（ドメイン or メールアドレス）
-  # ここに含まれる送信元はGemini判定なしで請求書と見なす
-  invoice_senders:
-    - "freee.co.jp"
-    - "moneyforward.com"
-    # - "billing.example.com"  # 必要に応じて追加
-  # N日以上返信していないメールを未返信チェック対象にする
-  unreplied_days: 3
-
 # --- Google Calendar 設定 ---
 google_calendar:
   credentials_file: "config/google_credentials.json"  # OAuthクレデンシャルJSON
