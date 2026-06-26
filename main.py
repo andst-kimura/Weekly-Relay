@@ -261,11 +261,32 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
     cfg_kb = config.get("knowledge_base", {})
     if cfg_kb.get("enabled", False):
         logger.info("\n--- ナレッジベース生成 ---")
+        team_members = config.get("team_members", [])
+        # チームメンバー分の Backlog 活動を追加収集
+        if team_members:
+            logger.info(f"チームメンバー {len(team_members)} 名分の活動を追加収集")
+            for member in team_members:
+                bid = member.get("backlog_user_id")
+                if not bid:
+                    continue
+                member_acts = backlog_client.get_all_activities_for_user(
+                    bid, week_start, week_end,
+                    cfg_backlog.get("target_projects"), cfg_backlog.get("exclude_projects"),
+                )
+                logger.info(f"  {member.get('name', bid)}: {len(member_acts)} 件")
+                backlog_activities.extend(member_acts)
+        # VectorStore 初期化（Gemini 有効時のみ）
+        vector_store = None
+        if gemini_client.enabled:
+            from src.vector_store import VectorStore
+            vector_store = VectorStore(embed_fn=gemini_client.embed)
         kb = KnowledgeBase(
             backlog_client=backlog_client,
             slack_client=slack_client,
             gemini_client=gemini_client,
             firestore_client=firestore_client,
+            vector_store=vector_store,
+            team_members=team_members,
         )
         kb.generate(backlog_activities, week_start, week_end, meeting_docs=meeting_docs)
 
@@ -533,7 +554,6 @@ def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> Non
             api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
             model=cfg_gemini.get("model", "gemini-2.0-flash"),
         )
-        # 議事録要約を並列計算して doc["_summary"] に格納 → KB 内の逐次呼び出しを排除
         ReportGenerator().pre_summarize_meetings(meeting_docs, gemini)
 
         fs = None
@@ -550,8 +570,32 @@ def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> Non
                            my_user_id=cfg_backlog_inner["my_user_id"])
         sc = SlackClient(bot_token=cfg_slack_inner["bot_token"],
                          my_user_id=cfg_slack_inner["my_user_id"])
+
+        # チームメンバー分の Backlog 活動を追加収集
+        team_members = config.get("team_members", [])
+        if team_members:
+            logger.info(f"チームメンバー {len(team_members)} 名分の活動を追加収集")
+            for member in team_members:
+                bid = member.get("backlog_user_id")
+                if not bid:
+                    continue
+                member_acts = bc.get_all_activities_for_user(
+                    bid, week_start, week_end,
+                    cfg_backlog_inner.get("target_projects"),
+                    cfg_backlog_inner.get("exclude_projects"),
+                )
+                logger.info(f"  {member.get('name', bid)}: {len(member_acts)} 件")
+                acts.extend(member_acts)
+
+        # VectorStore 初期化（Gemini 有効時のみ）
+        vector_store = None
+        if gemini.enabled:
+            from src.vector_store import VectorStore
+            vector_store = VectorStore(embed_fn=gemini.embed)
+
         kb = KnowledgeBase(backlog_client=bc, slack_client=sc,
-                           gemini_client=gemini, firestore_client=fs)
+                           gemini_client=gemini, firestore_client=fs,
+                           vector_store=vector_store, team_members=team_members)
         kb.generate(acts, week_start, week_end, meeting_docs=meeting_docs)
         logger.info("✅ ナレッジベース生成完了")
         return
@@ -591,6 +635,14 @@ def main():
         "--cleanup", action="store_true",
         help="Weekly Relay が転記したコメント・課題を対話形式で削除する"
     )
+    parser.add_argument(
+        "--search", metavar="QUERY",
+        help="ChromaDB でナレッジベースを意味検索する"
+    )
+    parser.add_argument(
+        "--sync-vectors", action="store_true",
+        help="Firestore の context_snapshots を全件 ChromaDB に同期する"
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -601,6 +653,57 @@ def main():
 
     if args.only:
         run_only_mode(config, args.only)
+        return
+
+    # 意味検索
+    if args.search:
+        cfg_gemini = config.get("gemini", {})
+        gemini = GeminiClient(
+            api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
+            model=cfg_gemini.get("model", "gemini-2.5-flash"),
+        )
+        if not gemini.enabled:
+            logger.error("--search には gemini.enabled: true が必要です")
+            return
+        from src.vector_store import VectorStore
+        vs = VectorStore(embed_fn=gemini.embed)
+        logger.info(f"🔍 \"{args.search}\" を検索中 ... （{vs.count()} 件インデックス済み）")
+        results = vs.search(args.search, n_results=5)
+        if not results:
+            logger.info("該当するドキュメントが見つかりませんでした")
+        for r in results:
+            logger.info(f"\n[{r['doc_id']}]  スコア: {r['score']}")
+            for line in r["text"].splitlines()[:6]:
+                logger.info(f"  {line}")
+        return
+
+    # Firestore → ChromaDB 全件同期
+    if args.sync_vectors:
+        cfg_gemini = config.get("gemini", {})
+        cfg_fs = config.get("firestore", {})
+        if not cfg_fs.get("enabled", False):
+            logger.error("--sync-vectors には firestore.enabled: true が必要です")
+            return
+        gemini = GeminiClient(
+            api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
+            model=cfg_gemini.get("model", "gemini-2.5-flash"),
+        )
+        if not gemini.enabled:
+            logger.error("--sync-vectors には gemini.enabled: true が必要です")
+            return
+        from src.vector_store import VectorStore
+        fs = FirestoreClient()
+        vs = VectorStore(embed_fn=gemini.embed)
+        docs = fs.list_context_snapshots()
+        logger.info(f"Firestore から {len(docs)} 件取得、ChromaDB に同期開始 ...")
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            futures = {ex.submit(vs.upsert, doc_id, data): doc_id for doc_id, data in docs}
+            for i, future in enumerate(_as_completed(futures), 1):
+                future.result()
+                if i % 20 == 0:
+                    logger.info(f"  {i}/{len(docs)} 件完了 ...")
+        logger.info(f"✅ ChromaDB 同期完了: {vs.count()} 件")
         return
 
     # ユーザーID確認モード
