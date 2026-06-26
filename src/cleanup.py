@@ -12,7 +12,11 @@ logger = logging.getLogger(__name__)
 JST = timezone(timedelta(hours=9))
 
 # Wasabi が投稿したコメントを識別するフッター文字列
-_WR_SIGNATURE = "Wasabi により自動転記されました"
+# "Weekly Relay" は旧名称（リネーム前）のため両方を検出対象とする
+_WR_SIGNATURES = [
+    "Wasabi により自動転記されました",
+    "Weekly Relay により自動転記されました",
+]
 
 
 class CleanupTool:
@@ -70,7 +74,7 @@ class CleanupTool:
 
             for comment in comments:
                 content = comment.get("content") or ""
-                if _WR_SIGNATURE not in content:
+                if not any(sig in content for sig in _WR_SIGNATURES):
                     continue
                 created_raw = comment.get("created", "")
                 try:
