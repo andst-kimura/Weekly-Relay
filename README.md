@@ -1,14 +1,16 @@
 # Wasabi
 
-> Backlog / Slack / Google Meet 議事録を横断収集し、Gemini AI で要約・分類して Backlog 親課題へ自動転記する週次進捗報告 AI アシスタント
+> Backlog / Slack / Google Meet 議事録を横断収集し、Gemini AI で要約・蓄積・活用する業務 AI アシスタント
 
 ---
 
 ## What is this?
 
-Backlog・Slack・Google Meet 議事録を自動収集し、Gemini AI で要約・整形して Backlog 親課題へ転記する**週次進捗報告の自動化システム**。
+Backlog・Slack・Google Meet 議事録を自動収集し、Gemini AI で要約・整形・ベクトル化して蓄積する**業務情報の収集・蓄積・活用を自動化する AI アシスタント**。
 
-進捗情報の流れを「収集 → 蓄積・整形 → 活用」の3段階で自動化することで、毎週の手作業を排除します。
+週次 Backlog 転記にとどまらず、ナレッジ検索・日次サマリー・チケットアラート・Backlog 課題の起票まで、日常の業務支援を一元的に担います。
+
+情報の流れを「収集 → 蓄積・整形 → 活用」の3段階で自動化することで、散在する情報の確認・整理にかかる手作業を排除します。
 
 ---
 
