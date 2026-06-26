@@ -742,6 +742,24 @@ def main():
         if not shared_info_cfg.get("project_key"):
             shared_info_cfg["project_key"] = cfg_bl.get("report_project_key", "SALES_TEAM")
 
+        # Gmail クライアント（請求書・未返信チェック用）
+        gmail_client = None
+        cfg_gmail = config.get("gmail", {})
+        if cfg_gmail.get("my_email"):
+            try:
+                from src.gmail_client import GmailClient
+                gmail_client = GmailClient(
+                    credentials_file=config.get("google_calendar", {}).get(
+                        "credentials_file", "config/google_credentials.json"
+                    ),
+                    my_email=cfg_gmail["my_email"],
+                    invoice_senders=cfg_gmail.get("invoice_senders", []),
+                    unreplied_days=cfg_gmail.get("unreplied_days", 3),
+                )
+                logger.info("Gmail クライアント初期化完了")
+            except Exception as e:
+                logger.warning(f"Gmail クライアント初期化失敗（Bot は続行）: {e}")
+
         bot = SlackBot(
             bot_token=bot_token,
             app_token=app_token,
@@ -752,6 +770,7 @@ def main():
             backlog_client=bl_client,
             shared_info_cfg=shared_info_cfg,
             slack_user_to_backlog=slack_to_backlog,
+            gmail_client=gmail_client,
         )
         bot.run()
         return

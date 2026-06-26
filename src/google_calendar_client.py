@@ -19,6 +19,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents.readonly",
+    "https://www.googleapis.com/auth/gmail.readonly",
 ]
 TOKEN_FILE = "config/google_token.pickle"
 CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3"

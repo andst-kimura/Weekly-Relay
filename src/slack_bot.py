@@ -8,10 +8,12 @@ Socket Mode で動作するため、パブリック URL 不要。
   - message (im): DM で送られた質問
 
 コマンド一覧:
-  質問    : @Wasabi Bot ACE刷新の進捗は？
-  進捗メモ: @Wasabi Bot メモ [ISSUE-KEY]: 内容
-  共有事項: @Wasabi Bot 共有事項 [タイトル]: 内容
-  削除    : 返信スレッドで @Wasabi Bot delete
+  質問      : @Wasabi Bot ACE刷新の進捗は？
+  進捗メモ  : @Wasabi Bot メモ [ISSUE-KEY]: 内容
+  共有事項  : @Wasabi Bot 共有事項 [タイトル]: 内容
+  請求書    : @Wasabi Bot 請求書
+  未返信    : @Wasabi Bot 未返信チェック
+  削除      : 返信スレッドで @Wasabi Bot delete
 """
 import logging
 import re
@@ -21,6 +23,8 @@ logger = logging.getLogger(__name__)
 _DELETE_COMMANDS = {"delete", "削除", "del", "消して", "消去"}
 _MEMO_PREFIXES = ("メモ", "memo", "進捗メモ", "手動メモ", "進捗入力")
 _SHARED_INFO_PREFIXES = ("共有事項", "共有", "shared")
+_INVOICE_COMMANDS = {"請求書", "invoice", "請求書チェック", "請求書一覧"}
+_UNREPLIED_COMMANDS = {"未返信チェック", "未返信", "未返信メール", "要返信"}
 # 課題キーのパターン（例: SALES_TEAM-23, MOBILEPOS-45）
 _ISSUE_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
 # 日付パターン（期限抽出用）: YYYY/MM/DD, YYYY-MM-DD, MM/DD, M/D
@@ -29,9 +33,9 @@ _DATE_RE = re.compile(
 )
 
 _HELP_TEXT = """\
-*Wasabi KB アシスタント* にようこそ！
+*Wasabi Bot* にようこそ！
 
-*質問（KB 検索 + AI 回答）*
+*KB 質問（KB 検索 + AI 回答）*
 　`@Wasabi Bot ACE刷新の進捗は？`
 
 *進捗メモの登録（週次レポートの情報源に追加）*
@@ -41,6 +45,12 @@ _HELP_TEXT = """\
 *共有事項の起票（Backlog に「共有事項」課題を作成）*
 　`@Wasabi Bot 共有事項 ACE刷新の日程変更について: 6/30→7/7に延期が決定しました`
 　`@Wasabi Bot 共有事項: タイトルを省略した場合は本文冒頭が件名になります`
+
+*Gmail：今月の請求書メール一覧*
+　`@Wasabi Bot 請求書`
+
+*Gmail：未返信メールチェック（3日以上放置）*
+　`@Wasabi Bot 未返信チェック`
 
 *Bot 返信の削除（チャンネル）*
 　返信スレッド内で `@Wasabi Bot delete` と送信
@@ -73,7 +83,8 @@ class SlackBot:
 
     def __init__(self, bot_token: str, app_token: str, vector_store, gemini_client,
                  n_results: int = 5, firestore_client=None, backlog_client=None,
-                 shared_info_cfg: dict = None, slack_user_to_backlog: dict = None):
+                 shared_info_cfg: dict = None, slack_user_to_backlog: dict = None,
+                 gmail_client=None):
         self._bot_token = bot_token
         self._app_token = app_token
         self.vs = vector_store
@@ -81,6 +92,7 @@ class SlackBot:
         self.n_results = n_results
         self.fs = firestore_client
         self.bl = backlog_client
+        self.gmail = gmail_client
         # shared_info_cfg: {"project_key": "SALES_TEAM", "issue_type_id": 915353}
         self._shared_info_cfg = shared_info_cfg or {}
         # slack_user_id -> backlog_user_id のマッピング（myself + team_members から構築）
@@ -203,6 +215,74 @@ class SlackBot:
             f"{due_note}"
         )
 
+    def _handle_invoice_check(self) -> str:
+        """今月の請求書メールを取得し Gemini で絞り込んで一覧を返す"""
+        if not self.gmail:
+            return "⚠️ Gmail が設定されていません。config.yaml の `gmail` セクションを確認してください。"
+        try:
+            candidates = self.gmail.get_invoice_emails()
+        except Exception as e:
+            logger.error(f"Gmail 請求書取得失敗: {e}")
+            return f"⚠️ Gmail の取得に失敗しました: {e}"
+
+        if not candidates:
+            return "今月の請求書メールは見つかりませんでした。"
+
+        invoices = []
+        for mail in candidates:
+            # 既知の送信元ドメインなら Gemini なしで採用
+            known = any(s in mail["from"] for s in (self.gmail.invoice_senders or []))
+            if known or self.gemini.classify_invoice(mail["from"], mail["subject"], mail["snippet"]):
+                invoices.append(mail)
+
+        if not invoices:
+            return "今月の請求書メールは見つかりませんでした（候補はありましたが Gemini が非該当と判断しました）。"
+
+        import datetime
+        now = datetime.datetime.now()
+        lines = [f"*今月（{now.month}月）の請求書メール: {len(invoices)} 件*\n"]
+        for i, m in enumerate(invoices, 1):
+            lines.append(f"{i}. *{m['subject']}*")
+            lines.append(f"   差出人: {m['from']}")
+            lines.append(f"   受信日: {m['date']}")
+            lines.append("")
+        return "\n".join(lines)
+
+    def _handle_unreplied_check(self) -> str:
+        """未返信メール候補を取得し Gemini で要返信か判定して一覧を返す"""
+        if not self.gmail:
+            return "⚠️ Gmail が設定されていません。config.yaml の `gmail` セクションを確認してください。"
+        try:
+            candidates = self.gmail.get_unreplied_candidates()
+        except Exception as e:
+            logger.error(f"Gmail 未返信取得失敗: {e}")
+            return f"⚠️ Gmail の取得に失敗しました: {e}"
+
+        if not candidates:
+            return f"受信トレイに {self.gmail.unreplied_days} 日以上放置されたメールはありませんでした。"
+
+        needs_reply = []
+        for mail in candidates:
+            if self.gemini.classify_needs_reply(
+                mail["from"], mail["to"], mail["subject"],
+                mail["snippet"], self.gmail.my_email
+            ):
+                needs_reply.append(mail)
+
+        if not needs_reply:
+            return (
+                f"受信トレイに {self.gmail.unreplied_days} 日以上放置されたメールはありますが、"
+                f"Gemini が返信不要と判断しました。"
+            )
+
+        lines = [f"*{self.gmail.unreplied_days} 日以上放置中の要返信メール: {len(needs_reply)} 件*\n"]
+        for i, m in enumerate(needs_reply, 1):
+            lines.append(f"{i}. *{m['subject']}*")
+            lines.append(f"   差出人: {m['from']}")
+            lines.append(f"   受信日: {m['date']}")
+            lines.append("")
+        return "\n".join(lines)
+
     def _handle_memo(self, raw_text: str, user: str, channel: str) -> str:
         """メモコマンドを解析して Firestore に保存し、確認メッセージを返す"""
         text = raw_text
@@ -277,6 +357,20 @@ class SlackBot:
         # 共有事項コマンド
         if any(text.lower().startswith(p.lower()) for p in _SHARED_INFO_PREFIXES):
             reply = self._handle_shared_info(text, user, channel)
+            say_fn(text=reply, **kwargs)
+            return None, None
+
+        # 請求書コマンド
+        if text.strip() in _INVOICE_COMMANDS:
+            say_fn(text="Gmail を検索しています...", **kwargs)
+            reply = self._handle_invoice_check()
+            say_fn(text=reply, **kwargs)
+            return None, None
+
+        # 未返信チェックコマンド
+        if text.strip() in _UNREPLIED_COMMANDS:
+            say_fn(text="Gmail を確認しています...", **kwargs)
+            reply = self._handle_unreplied_check()
             say_fn(text=reply, **kwargs)
             return None, None
 

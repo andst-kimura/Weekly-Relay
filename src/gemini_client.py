@@ -165,6 +165,44 @@ _DAILY_SUMMARY_PROMPT = """\
 {activities}
 """
 
+# Gmail 請求書判定プロンプト
+_INVOICE_CLASSIFY_PROMPT = """\
+以下のメールが「請求書・請求に関するメール」かどうかを判定してください。
+
+## メール情報
+送信者: {sender}
+件名: {subject}
+本文（冒頭）: {snippet}
+
+## 判定ルール
+- 請求書・ご請求書・invoice・billing に関する内容なら YES
+- 見積書・領収書・支払い確認のみの場合は NO
+- 広告・メルマガ・自動通知（注文確認など）は NO
+
+## 出力形式（必ずこの形式のみで答えること）
+YES または NO のみ
+"""
+
+# Gmail 未返信判定プロンプト
+_UNREPLIED_CLASSIFY_PROMPT = """\
+以下のメールが「私（{my_email}）が返信すべきメール」かどうかを判定してください。
+
+## メール情報
+送信者: {sender}
+宛先: {to}
+件名: {subject}
+本文（冒頭）: {snippet}
+
+## 判定ルール
+- 私への質問・依頼・確認依頼・承認依頼など、アクションが必要な場合は YES
+- CC に入っているだけで直接の返信は不要な場合は NO
+- 自動送信メール・通知メール・メルマガは NO
+- 既に別の手段で対応済みの可能性は考慮しない（本文だけで判断する）
+
+## 出力形式（必ずこの形式のみで答えること）
+YES または NO のみ
+"""
+
 # KB 検索結果を文脈に質問回答させるプロンプト（RAG）
 _RAG_PROMPT = """\
 あなたは社内業務の知識アシスタントです。
@@ -381,3 +419,33 @@ class GeminiClient:
         except Exception as e:
             logger.warning(f"Gemini 日次サマリー生成失敗: {e}")
             return ""
+
+    def classify_invoice(self, sender: str, subject: str, snippet: str) -> bool:
+        """メールが請求書メールかどうかを判定する"""
+        if not self.enabled:
+            return False
+        try:
+            prompt = _INVOICE_CLASSIFY_PROMPT.format(
+                sender=sender, subject=subject, snippet=snippet[:500]
+            )
+            answer = self._call(prompt).strip().upper()
+            return answer.startswith("YES")
+        except Exception as e:
+            logger.warning(f"Gemini 請求書判定失敗: {e}")
+            return False
+
+    def classify_needs_reply(self, sender: str, to: str, subject: str,
+                              snippet: str, my_email: str) -> bool:
+        """メールが返信すべきものかどうかを判定する"""
+        if not self.enabled:
+            return False
+        try:
+            prompt = _UNREPLIED_CLASSIFY_PROMPT.format(
+                my_email=my_email, sender=sender, to=to,
+                subject=subject, snippet=snippet[:500]
+            )
+            answer = self._call(prompt).strip().upper()
+            return answer.startswith("YES")
+        except Exception as e:
+            logger.warning(f"Gemini 未返信判定失敗: {e}")
+            return False
