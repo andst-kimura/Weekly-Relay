@@ -136,6 +136,10 @@ MM/DD：マイルストーン・締切内容
 | ③ | Gemini AI で判別（Gemini 有効時のみ） | ①②未対応の Slack チャンネル |
 | ④ | Gemini で転記内容の矛盾チェック（Gemini 有効時のみ） | 全転記結果を横断検証 |
 
+**議事録の関連フィルタリング**
+
+`channel_mapping` に `related_meeting_keywords` を設定すると、全体MTG（販売チームMTG 等）の議事録を親課題へ紐付ける際にキーワードフィルタを適用します。議事録タイトル・要約・本文にキーワードを含む議事録のみを渡し、関係ない他プロジェクトの議題が転記内容に混入することを防ぎます。省略した場合はすべての議事録が対象になります。
+
 ---
 
 ## Google Meet 議事録の収集
@@ -394,6 +398,9 @@ slack:
       parent_issue_key: "SALES_TEAM-27"
       label: "販売チーム HBLab"
       project_key: "HBLAB"
+      related_meeting_keywords:          # 議事録フィルタキーワード（省略可）
+        - "ストアアプリ"                   # 全体MTGの議事録からこのキーワードを含む行のみ抽出
+        - "hblab"                        # 無関係な議題の混入を防ぐ
 
 google_calendar:
   credentials_file: "config/google_credentials.json"
