@@ -186,6 +186,17 @@ class BacklogClient:
 
         return all_activities
 
+    def get_all_activities_for_user(self, user_id: int, since: datetime, until: datetime,
+                                     target_projects: list[str] = None,
+                                     exclude_projects: list[str] = None) -> list[dict]:
+        """指定ユーザーの全活動を取得（KB チーム収集用）。自分以外のメンバーにも使用可。"""
+        original = self.my_user_id
+        self.my_user_id = user_id
+        try:
+            return self.get_all_my_activities(since, until, target_projects, exclude_projects)
+        finally:
+            self.my_user_id = original
+
     def get_all_assigned_issues(self, project_id: int) -> list[dict]:
         """自分が担当者の全課題を取得（日付フィルタなし・全ステータス対象）"""
         all_issues = []

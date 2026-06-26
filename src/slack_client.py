@@ -235,6 +235,47 @@ class SlackClient:
             logger.error(f"Slack DM 送信失敗: {e}")
             return False
 
+    def get_team_messages_in_channel(self, channel_id: str, channel_name: str,
+                                      since: datetime, until: datetime,
+                                      team_user_ids: list[str]) -> list[dict]:
+        """チームメンバー全員のトップレベル投稿を取得する。
+        スレッド内の返信は knowledge_base 側で get_full_thread により補完される。"""
+        team_set = set(team_user_ids)
+        messages = []
+        try:
+            response = self.client.conversations_history(
+                channel=channel_id,
+                oldest=str(since.timestamp()),
+                latest=str(until.timestamp()),
+                limit=1000,
+            )
+            for msg in response.get("messages", []):
+                if msg.get("subtype") or msg.get("type") != "message":
+                    continue
+                uid = msg.get("user", "")
+                if uid not in team_set:
+                    continue
+                ts = float(msg.get("ts", 0))
+                resolved_text = self.resolve_user_mentions(msg.get("text", ""))
+                messages.append({
+                    "channel_id": channel_id,
+                    "channel_name": channel_name,
+                    "user_id": uid,
+                    "user_name": self.get_user_name(uid),
+                    "text": resolved_text,
+                    "ts": ts,
+                    "datetime": datetime.fromtimestamp(ts),
+                    "thread_ts": msg.get("thread_ts"),
+                    "is_mine": uid == self.my_user_id,
+                    "reply_count": msg.get("reply_count", 0),
+                })
+        except SlackApiError as e:
+            if "not_in_channel" in str(e):
+                logger.debug(f"チャンネル '{channel_name}' は参加していません（スキップ）")
+            else:
+                logger.warning(f"チャンネル '{channel_name}' の取得エラー: {e}")
+        return messages
+
     def get_all_my_messages(self, since: datetime, until: datetime) -> list[dict]:
         """全参加チャンネルから自分のメッセージを取得"""
         channels = self.get_my_channels()

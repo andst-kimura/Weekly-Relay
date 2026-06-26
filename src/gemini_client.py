@@ -315,6 +315,16 @@ class GeminiClient:
             logger.warning(f"Gemini 矛盾チェック失敗: {e}")
             return "矛盾なし"
 
+    def embed(self, text: str) -> list[float]:
+        """テキストを埋め込みベクトルに変換（text-embedding-004）"""
+        if not self.enabled:
+            raise RuntimeError("Gemini API が無効です（embed には API キーが必要）")
+        result = self._client.models.embed_content(
+            model="models/text-embedding-004",
+            contents=text,
+        )
+        return list(result.embeddings[0].values)
+
     def build_daily_summary(self, date: str, activities: str) -> str:
         """当日の活動データから Slack 向け日次サマリー文を生成する"""
         if not self.enabled or not activities.strip():

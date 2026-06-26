@@ -15,7 +15,6 @@ import google.auth.transport.requests
 logger = logging.getLogger(__name__)
 
 _TTL_DAYS_SYNC_LOG = 90
-_TTL_DAYS_CONTEXT = 30
 
 _FIRESTORE_BASE = "https://firestore.googleapis.com/v1"
 
@@ -167,15 +166,36 @@ class FirestoreClient:
 
     def save_context_snapshot(self, doc_id: str, data: dict) -> None:
         try:
-            now = datetime.now(timezone.utc)
-            payload = {
-                **data,
-                "saved_at": now,
-                "expire_at": now + timedelta(days=_TTL_DAYS_CONTEXT),
-            }
+            payload = {**data, "saved_at": datetime.now(timezone.utc)}
             _set_doc("context_snapshots", doc_id, payload)
         except Exception as e:
             logger.warning(f"Firestore save 失敗 ({doc_id}): {e}")
+
+    def list_context_snapshots(self, page_size: int = 100) -> list[tuple[str, dict]]:
+        """context_snapshots の全ドキュメントを返す（--sync-vectors 用）"""
+        try:
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT", "weekly-relay")
+            database = os.environ.get("FIRESTORE_DATABASE", "weekly-relay")
+            url = _col_path(project, database, "context_snapshots")
+            params: dict = {"pageSize": page_size}
+            results: list[tuple[str, dict]] = []
+            while True:
+                resp = _get_session().get(url, params=params, timeout=60)
+                resp.raise_for_status()
+                body = resp.json()
+                for doc in body.get("documents", []):
+                    doc_id = doc["name"].split("/")[-1]
+                    doc_data = _doc_to_dict(doc)
+                    if doc_data:
+                        results.append((doc_id, doc_data))
+                page_token = body.get("nextPageToken")
+                if not page_token:
+                    break
+                params["pageToken"] = page_token
+            return results
+        except Exception as e:
+            logger.warning(f"Firestore list 失敗: {e}")
+            return []
 
     # ------------------------------------------------------------------ #
     #  weekly_reports
@@ -195,6 +215,7 @@ class FirestoreClient:
         except Exception as e:
             logger.warning(f"Firestore 週次レポート保存失敗: {e}")
 
+
     # ------------------------------------------------------------------ #
     #  calendar_reports
     # ------------------------------------------------------------------ #
@@ -209,6 +230,7 @@ class FirestoreClient:
             logger.info(f"Firestore カレンダーレポート保存: calendar_reports/{doc_id}")
         except Exception as e:
             logger.warning(f"Firestore カレンダーレポート保存失敗: {e}")
+
 
     # ------------------------------------------------------------------ #
     #  sync_logs
