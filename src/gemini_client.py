@@ -147,12 +147,12 @@ _SLACK_SUMMARY_PROMPT = """\
 
 # 日次サマリー（Gemini版）
 _DAILY_SUMMARY_PROMPT = """\
-あなたは社内AIアシスタント Weekly Relay です。
+あなたは社内AIアシスタント Wasabi です。
 以下の当日の活動データを元に、夕方の日次サマリーを Slack 向けに自然な文章で作成してください。
 出力のみ返し、前置き・後置きは不要です。
 
 ## フォーマット
-:memo: *Weekly Relay 日次サマリー — {date}*
+:memo: *Wasabi 日次サマリー — {date}*
 
 *今日の主な活動*
 （Backlog・Slack の活動をまとめて3〜5文の自然な文章で。箇条書き不要）

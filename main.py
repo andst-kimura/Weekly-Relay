@@ -100,7 +100,7 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
     _started_at = _time.monotonic()
 
     logger.info("=" * 60)
-    logger.info("Weekly Relay 開始")
+    logger.info("Wasabi 開始")
     logger.info("=" * 60)
 
     week_start, week_end = get_week_range(reference_dt)
@@ -292,7 +292,7 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
         kb.generate(backlog_activities, week_start, week_end, meeting_docs=meeting_docs)
 
     duration = _time.monotonic() - _started_at
-    logger.info(f"\n✅ Weekly Relay 完了（所要時間: {duration:.1f}秒）")
+    logger.info(f"\n✅ Wasabi 完了（所要時間: {duration:.1f}秒）")
     logger.info("=" * 60)
 
     if firestore_client:
@@ -634,7 +634,7 @@ def main():
     )
     parser.add_argument(
         "--cleanup", action="store_true",
-        help="Weekly Relay が転記したコメント・課題を対話形式で削除する"
+        help="Wasabi が転記したコメント・課題を対話形式で削除する"
     )
     parser.add_argument(
         "--search", metavar="QUERY",

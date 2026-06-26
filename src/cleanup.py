@@ -1,6 +1,6 @@
 """
 クリーンアップモジュール
-Weekly Relay が転記したコメント・課題を対話形式で削除する
+Wasabi が転記したコメント・課題を対話形式で削除する
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 JST = timezone(timedelta(hours=9))
 
-# Weekly Relay が投稿したコメントを識別するフッター文字列
-_WR_SIGNATURE = "Weekly Relay により自動転記されました"
+# Wasabi が投稿したコメントを識別するフッター文字列
+_WR_SIGNATURE = "Wasabi により自動転記されました"
 
 
 class CleanupTool:
@@ -23,14 +23,14 @@ class CleanupTool:
     def run(self) -> None:
         """対話形式のクリーンアップメニューを起動する"""
         print("\n" + "=" * 60)
-        print("  Weekly Relay クリーンアップツール")
+        print("  Wasabi クリーンアップツール")
         print("=" * 60)
-        print("Weekly Relay が転記したコメント・課題を削除します。\n")
+        print("Wasabi が転記したコメント・課題を削除します。\n")
 
         while True:
             print("操作を選んでください:")
             print("  1. コメントを削除（親課題へのコメント転記分）")
-            print("  2. 課題を削除（Weekly Relay が起票した課題）")
+            print("  2. 課題を削除（Wasabi が起票した課題）")
             print("  q. 終了")
             choice = input("\n> ").strip().lower()
 
@@ -49,7 +49,7 @@ class CleanupTool:
     # ------------------------------------------------------------------ #
 
     def _cleanup_comments(self) -> None:
-        """Weekly Relay のコメントを検索して対話形式で削除する"""
+        """Wasabi のコメントを検索して対話形式で削除する"""
         print("\nプロジェクトの親課題を検索中...")
         try:
             parent_issues = self.client.get_parent_issues(self.report_project_key)
@@ -93,10 +93,10 @@ class CleanupTool:
                 })
 
         if not found:
-            print("\nWeekly Relay のコメントは見つかりませんでした。\n")
+            print("\nWasabi のコメントは見つかりませんでした。\n")
             return
 
-        print(f"\n{len(found)} 件の Weekly Relay コメントが見つかりました:\n")
+        print(f"\n{len(found)} 件の Wasabi コメントが見つかりました:\n")
         for item in found:
             print(
                 f"  [{item['index']:>2}] {item['issue_key']} 「{item['issue_summary'][:20]}」"
@@ -133,7 +133,7 @@ class CleanupTool:
     # ------------------------------------------------------------------ #
 
     def _cleanup_issues(self) -> None:
-        """Weekly Relay が起票した課題を検索して対話形式で削除する"""
+        """Wasabi が起票した課題を検索して対話形式で削除する"""
         keyword = input(
             "\n削除対象の課題キーを入力してください（カンマ区切り / q でキャンセル）\n"
             "例: SALES_TEAM-999,SALES_TEAM-1000\n> "

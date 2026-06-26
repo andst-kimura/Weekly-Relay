@@ -94,8 +94,8 @@ class BacklogPoster:
         # 末尾のフッターにタグを追加
         if tag:
             body = body.replace(
-                "*このコメントは Weekly Relay により自動転記されました*",
-                f"*このコメントは Weekly Relay により自動転記されました{footer_extra}*",
+                "*このコメントは Wasabi により自動転記されました*",
+                f"*このコメントは Wasabi により自動転記されました{footer_extra}*",
             )
         return body
 

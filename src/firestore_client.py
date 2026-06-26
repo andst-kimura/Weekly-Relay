@@ -151,7 +151,7 @@ def _add_doc(collection: str, data: dict) -> None:
 # --------------------------------------------------------------------------- #
 
 class FirestoreClient:
-    """Weekly Relay 用 Firestore CRUD ラッパー（REST 実装）"""
+    """Wasabi 用 Firestore CRUD ラッパー（REST 実装）"""
 
     # ------------------------------------------------------------------ #
     #  context_snapshots（チケット / Slack / 議事録 KB）

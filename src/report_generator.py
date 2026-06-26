@@ -86,7 +86,7 @@ class ReportGenerator:
         w_end = aggregated["week_end"].strftime("%Y/%m/%d")
 
         lines = [
-            f"## Weekly Relay 週次進捗レポート {w_start}〜{w_end}",
+            f"## Wasabi 週次進捗レポート {w_start}〜{w_end}",
             "",
             "---",
             "",
@@ -194,7 +194,7 @@ class ReportGenerator:
                 lines.append("")
 
         lines.append("---")
-        lines.append("*このコメントは Weekly Relay により自動転記されました*")
+        lines.append("*このコメントは Wasabi により自動転記されました*")
 
         return "\n".join(lines)
 
@@ -207,7 +207,7 @@ class ReportGenerator:
         w_end = aggregated["week_end"].strftime("%Y/%m/%d")
 
         lines = [
-            f"## Weekly Relay 週次進捗レポート {w_start}〜{w_end}",
+            f"## Wasabi 週次進捗レポート {w_start}〜{w_end}",
             "",
             "---",
             "",
@@ -302,7 +302,7 @@ class ReportGenerator:
                 lines.append("")
 
         lines.append("---")
-        lines.append("*このコメントは Weekly Relay により自動転記されました*")
+        lines.append("*このコメントは Wasabi により自動転記されました*")
         return "\n".join(lines)
 
     def build_status_next_action(
@@ -324,8 +324,8 @@ class ReportGenerator:
         """
         w_start = week_start.strftime("%Y/%m/%d")
         w_end = week_end.strftime("%Y/%m/%d")
-        header = f"## Weekly Relay 週次進捗レポート {w_start}〜{w_end}\n\n---\n\n"
-        footer = "\n\n---\n*このコメントは Weekly Relay により自動転記されました*"
+        header = f"## Wasabi 週次進捗レポート {w_start}〜{w_end}\n\n---\n\n"
+        footer = "\n\n---\n*このコメントは Wasabi により自動転記されました*"
 
         if gemini_client and gemini_client.enabled:
             sources_text = self._build_sources_text(

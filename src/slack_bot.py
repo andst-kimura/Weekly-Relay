@@ -8,10 +8,10 @@ Socket Mode で動作するため、パブリック URL 不要。
   - message (im): DM で送られた質問
 
 コマンド一覧:
-  質問    : @Weekly Relay ACE刷新の進捗は？
-  進捗メモ: @Weekly Relay メモ [ISSUE-KEY]: 内容
-  共有事項: @Weekly Relay 共有事項 [タイトル]: 内容
-  削除    : 返信スレッドで @Weekly Relay delete
+  質問    : @Wasabi Bot ACE刷新の進捗は？
+  進捗メモ: @Wasabi Bot メモ [ISSUE-KEY]: 内容
+  共有事項: @Wasabi Bot 共有事項 [タイトル]: 内容
+  削除    : 返信スレッドで @Wasabi Bot delete
 """
 import logging
 import re
@@ -29,21 +29,21 @@ _DATE_RE = re.compile(
 )
 
 _HELP_TEXT = """\
-*Weekly Relay KB アシスタント* にようこそ！
+*Wasabi KB アシスタント* にようこそ！
 
 *質問（KB 検索 + AI 回答）*
-　`@Weekly Relay ACE刷新の進捗は？`
+　`@Wasabi Bot ACE刷新の進捗は？`
 
 *進捗メモの登録（週次レポートの情報源に追加）*
-　`@Weekly Relay メモ SALES_TEAM-23: ポスタスのエラーは解消済み。6/27本番反映予定`
-　`@Weekly Relay メモ ポスタスの検証環境のエラーが解消した`（課題キー省略可）
+　`@Wasabi Bot メモ SALES_TEAM-23: ポスタスのエラーは解消済み。6/27本番反映予定`
+　`@Wasabi Bot メモ ポスタスの検証環境のエラーが解消した`（課題キー省略可）
 
 *共有事項の起票（Backlog に「共有事項」課題を作成）*
-　`@Weekly Relay 共有事項 ACE刷新の日程変更について: 6/30→7/7に延期が決定しました`
-　`@Weekly Relay 共有事項: タイトルを省略した場合は本文冒頭が件名になります`
+　`@Wasabi Bot 共有事項 ACE刷新の日程変更について: 6/30→7/7に延期が決定しました`
+　`@Wasabi Bot 共有事項: タイトルを省略した場合は本文冒頭が件名になります`
 
 *Bot 返信の削除（チャンネル）*
-　返信スレッド内で `@Weekly Relay delete` と送信
+　返信スレッド内で `@Wasabi Bot delete` と送信
 
 *使い方（DM）*
 　上記コマンドをメンションなしで送信。削除は `delete` と入力。
@@ -124,7 +124,7 @@ class SlackBot:
         if not text:
             return (
                 "共有事項の内容を入力してください。\n"
-                "例: `@Weekly Relay 共有事項 タイトル: 内容`"
+                "例: `@Wasabi Bot 共有事項 タイトル: 内容`"
             )
 
         # タイトルと本文を分離（「タイトル: 本文」 or 「: 本文」 or 「本文のみ」）
@@ -158,7 +158,7 @@ class SlackBot:
         description = (
             f"{body}\n\n"
             f"---\n"
-            f"*Slack Bot（Weekly Relay）経由で起票*\n"
+            f"*Slack Bot（Wasabi）経由で起票*\n"
             f"投稿者 Slack ID: {slack_user_id} / チャンネル: {channel}"
         )
 
@@ -218,7 +218,7 @@ class SlackBot:
             text = _ISSUE_KEY_RE.sub("", text, count=1).lstrip(" 　:：").strip()
 
         if not text:
-            return "メモの内容を入力してください。\n例: `@Weekly Relay メモ SALES_TEAM-23: 内容`"
+            return "メモの内容を入力してください。\n例: `@Wasabi Bot メモ SALES_TEAM-23: 内容`"
 
         if self.fs:
             self.fs.save_manual_memo(
