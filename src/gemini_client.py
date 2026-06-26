@@ -165,6 +165,24 @@ _DAILY_SUMMARY_PROMPT = """\
 {activities}
 """
 
+# KB 検索結果を文脈に質問回答させるプロンプト（RAG）
+_RAG_PROMPT = """\
+あなたは社内業務の知識アシスタントです。
+以下の「参照ドキュメント」に記載されている情報のみを使って質問に回答してください。
+
+## 参照ドキュメント
+{context}
+
+## 質問
+{query}
+
+## 回答ルール
+- 参照ドキュメントに記載されている情報のみを使って回答する
+- 参照ドキュメントに情報がない場合は「KBに該当情報がありません」とのみ答える
+- 回答は日本語で簡潔に（300字以内）
+- 末尾に情報源（ドキュメントID）を箇条書きで記載する
+"""
+
 # Gemini が議事録を生成できなかった場合のフレーズ（フィルタリング用）
 _EMPTY_MEETING_PHRASES = [
     "要約は生成されませんでした",
@@ -324,6 +342,24 @@ class GeminiClient:
         except Exception as e:
             logger.warning(f"Gemini 矛盾チェック失敗: {e}")
             return "矛盾なし"
+
+    def answer_with_context(self, query: str, context_docs: list[dict]) -> str:
+        """RAG: ChromaDB 検索結果を文脈として質問に回答する。
+        context_docs: VectorStore.search() の戻り値リスト
+        """
+        if not self.enabled or not context_docs:
+            return ""
+        context_parts = [
+            f"[{doc['doc_id']}] (関連度:{doc['score']})\n{doc['text']}"
+            for doc in context_docs
+        ]
+        context = "\n\n---\n\n".join(context_parts)
+        try:
+            prompt = _RAG_PROMPT.format(context=context, query=query)
+            return self._call(prompt)
+        except Exception as e:
+            logger.warning(f"Gemini RAG回答生成失敗: {e}")
+            return ""
 
     def embed(self, text: str) -> list[float]:
         """テキストを埋め込みベクトルに変換（text-embedding-004）"""

@@ -108,6 +108,15 @@ slack:
       project_key: ""
       parent_issue_key: ""
       label: "新規オープン関連"
+# --- Slack Bot 設定（KB 質問応答 Bot）---
+slack_bot:
+  enabled: true
+  # Socket Mode 用トークン（xapp-...）
+  # Slack App 設定 > Socket Mode で有効化し、App-Level Token を発行
+  app_token: "${SLACK_APP_TOKEN}"
+  # 1回の質問で参照する KB ドキュメント数（多いほど精度↑、速度↓）
+  n_results: 5
+
 # --- Google Calendar 設定 ---
 google_calendar:
   credentials_file: "config/google_credentials.json"  # OAuthクレデンシャルJSON

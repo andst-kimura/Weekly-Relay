@@ -637,7 +637,11 @@ def main():
     )
     parser.add_argument(
         "--search", metavar="QUERY",
-        help="ChromaDB でナレッジベースを意味検索する"
+        help="ChromaDB でナレッジベースを意味検索し、Gemini が回答を生成する（RAG）"
+    )
+    parser.add_argument(
+        "--bot", action="store_true",
+        help="Slack Bot を Socket Mode で起動する（メンション・DM で KB 質問応答）"
     )
     parser.add_argument(
         "--sync-vectors", action="store_true",
@@ -655,7 +659,7 @@ def main():
         run_only_mode(config, args.only)
         return
 
-    # 意味検索
+    # 意味検索 + RAG 回答
     if args.search:
         cfg_gemini = config.get("gemini", {})
         gemini = GeminiClient(
@@ -671,10 +675,52 @@ def main():
         results = vs.search(args.search, n_results=5)
         if not results:
             logger.info("該当するドキュメントが見つかりませんでした")
+            return
+        # 参照ドキュメント一覧
+        logger.info("\n--- 参照ドキュメント ---")
         for r in results:
-            logger.info(f"\n[{r['doc_id']}]  スコア: {r['score']}")
-            for line in r["text"].splitlines()[:6]:
+            logger.info(f"[{r['doc_id']}]  スコア: {r['score']}")
+            for line in r["text"].splitlines()[:4]:
                 logger.info(f"  {line}")
+        # Gemini RAG 回答
+        logger.info("\n--- Gemini 回答 ---")
+        answer = gemini.answer_with_context(args.search, results)
+        if answer:
+            for line in answer.splitlines():
+                logger.info(line)
+        else:
+            logger.info("回答の生成に失敗しました。")
+        return
+
+    # Slack Bot 起動
+    if args.bot:
+        cfg_gemini = config.get("gemini", {})
+        cfg_bot = config.get("slack_bot", {})
+        cfg_slack = config.get("slack", {})
+        gemini = GeminiClient(
+            api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
+            model=cfg_gemini.get("model", "gemini-2.5-flash"),
+        )
+        if not gemini.enabled:
+            logger.error("--bot には gemini.enabled: true が必要です")
+            return
+        app_token = cfg_bot.get("app_token", "")
+        if not app_token:
+            logger.error("--bot には config.yaml の slack_bot.app_token（SLACK_APP_TOKEN）が必要です")
+            return
+        bot_token = cfg_slack.get("bot_token", "")
+        n_results = cfg_bot.get("n_results", 5)
+        from src.vector_store import VectorStore
+        from src.slack_bot import SlackBot
+        vs = VectorStore(embed_fn=gemini.embed)
+        bot = SlackBot(
+            bot_token=bot_token,
+            app_token=app_token,
+            vector_store=vs,
+            gemini_client=gemini,
+            n_results=n_results,
+        )
+        bot.run()
         return
 
     # Firestore → ChromaDB 全件同期

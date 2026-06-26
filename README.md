@@ -505,14 +505,48 @@ python main.py --only <機能名>
 
 > **データキャッシュ**: `--only report` / `--only kb` は初回実行時に Backlog・Slack・Calendar・議事録のデータを `output/cache/YYYYMMDD.pkl` に保存します。2回目以降は API 呼び出しをスキップしてキャッシュから即座にロードします（当日中有効）。
 
-### 意味検索
+### 意味検索 + RAG 回答
 
-KB に蓄積されたデータを自然言語で検索します。`--only kb` を少なくとも1回実行してインデックスを構築してから使用してください。
+KB に蓄積されたデータを自然言語で検索し、Gemini が回答を生成します（RAG）。`--only kb` を少なくとも1回実行してインデックスを構築してから使用してください。
 
 ```bash
-python main.py --search "ACE刷新の進捗"
-python main.py --search "先週の障害対応"
+python main.py --search "ACE刷新の進捗は？"
+python main.py --search "ポスタス検証環境のエラーは解消したか"
 ```
+
+出力は「参照ドキュメント（上位5件）」と「Gemini 回答」の2セクション構成です。
+
+### Slack Bot 起動（KB 質問応答）
+
+Slack 上でメンションまたは DM で質問すると、KB を検索して Gemini が回答します。
+
+```bash
+python main.py --bot
+```
+
+**Slack App の追加設定（初回のみ）**
+
+1. https://api.slack.com/apps でアプリを選択
+2. **Socket Mode** を有効化 → **App-Level Token** を発行（スコープ: `connections:write`）
+3. `.env` に `SLACK_APP_TOKEN=xapp-...` を追加
+4. **Event Subscriptions** → Bot Events に以下を追加：
+
+| イベント | 用途 |
+|---|---|
+| `app_mention` | チャンネル内でメンションされた質問に回答 |
+| `message.im` | DM で受け取った質問に回答 |
+
+**使い方（起動後）**
+
+```
+# チャンネル内
+@Weekly Relay ポスタス検証環境のエラーの状況は？
+
+# DM
+ACE刷新の今後のスケジュールは？
+```
+
+> Bot は常駐プロセスとして動作します。スケジューラ（`python main.py`）と同時に使いたい場合は別ターミナルで起動してください。
 
 ### Firestore → ChromaDB 全件同期
 
@@ -583,7 +617,8 @@ python main.py --cleanup
 | `--run-now` | スケジューラを待たず今すぐ週次レポートを実行 |
 | `--dry-run` | Backlog への書き込みをスキップして動作確認 |
 | `--only <機能名>` | 特定機能のみ実行（`backlog` / `slack` / `calendar` / `firestore` / `report` / `kb`） |
-| `--search "クエリ"` | ChromaDB でナレッジベースを意味検索 |
+| `--search "クエリ"` | KB を意味検索し Gemini が自然言語で回答（RAG） |
+| `--bot` | Slack Bot を Socket Mode で起動（メンション・DM で KB 質問応答） |
 | `--sync-vectors` | Firestore の `context_snapshots` を全件 ChromaDB に同期 |
 | `--cleanup` | 転記済みコメント・課題を対話形式で削除 |
 | `--run-alert` | 未対応チケット警告を今すぐ実行 |
