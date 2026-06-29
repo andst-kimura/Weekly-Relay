@@ -320,6 +320,100 @@ class FirestoreClient:
             return ""
 
     # ------------------------------------------------------------------ #
+    #  ベクトル検索（Firestore Vector Search）
+    # ------------------------------------------------------------------ #
+
+    def upsert_embedding(self, doc_id: str, embedding: list[float]) -> None:
+        """context_snapshots の既存ドキュメントに embedding フィールドを追加/更新する。
+        Firestore Vector 型として保存し、findNearest クエリで検索可能にする。
+        """
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", "weekly-relay")
+        database = os.environ.get("FIRESTORE_DATABASE", "weekly-relay")
+        url = _doc_path(project, database, "context_snapshots", doc_id)
+        # Firestore Vector 型の REST 表現
+        vector_value = {
+            "mapValue": {
+                "fields": {
+                    "__type__": {"stringValue": "__vector__"},
+                    "value": {
+                        "arrayValue": {
+                            "values": [{"doubleValue": float(v)} for v in embedding]
+                        }
+                    }
+                }
+            }
+        }
+        body = {"fields": {"embedding": vector_value}}
+        # updateMask で embedding フィールドのみ更新（他フィールドを上書きしない）
+        resp = _get_session().patch(
+            url,
+            json=body,
+            params={"updateMask.fieldPaths": "embedding"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+    def vector_search(self, embedding: list[float], n_results: int = 5) -> list[dict]:
+        """Firestore findNearest でベクトル近傍検索を実行する。
+        戻り値: [{"doc_id": str, "score": float, "data": dict}, ...]
+        """
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", "weekly-relay")
+        database = os.environ.get("FIRESTORE_DATABASE", "weekly-relay")
+        db_root = f"projects/{project}/databases/{database}"
+        url = f"{_FIRESTORE_BASE}/{db_root}/documents:runQuery"
+
+        query_vector = {
+            "mapValue": {
+                "fields": {
+                    "__type__": {"stringValue": "__vector__"},
+                    "value": {
+                        "arrayValue": {
+                            "values": [{"doubleValue": float(v)} for v in embedding]
+                        }
+                    }
+                }
+            }
+        }
+        body = {
+            "structuredQuery": {
+                "from": [{"collectionId": "context_snapshots"}],
+                "findNearest": {
+                    "vectorField": {"fieldPath": "embedding"},
+                    "queryVector": query_vector,
+                    "distanceMeasure": "COSINE",
+                    "limit": n_results,
+                    "distanceResultField": "_distance",
+                },
+            }
+        }
+        try:
+            resp = _get_session().post(url, json=body, timeout=30)
+            resp.raise_for_status()
+            results = []
+            for item in resp.json():
+                doc = item.get("document")
+                if not doc:
+                    continue
+                doc_id = doc["name"].split("/")[-1]
+                data = _doc_to_dict(doc) or {}
+                distance = item.get("readTime") and None  # distanceResultField は data 内に入る
+                distance = data.pop("_distance", None)
+                score = round(1.0 - float(distance), 4) if distance is not None else 0.0
+                results.append({"doc_id": doc_id, "score": score, "data": data})
+            return results
+        except Exception as e:
+            logger.warning(f"Firestore vector_search 失敗: {e}")
+            return []
+
+    def count_embeddings(self) -> int:
+        """embedding フィールドを持つ context_snapshots ドキュメント数を返す。"""
+        try:
+            docs = self.list_context_snapshots(page_size=300)
+            return sum(1 for _, d in docs if "embedding" in d)
+        except Exception:
+            return 0
+
+    # ------------------------------------------------------------------ #
     #  sync_logs
     # ------------------------------------------------------------------ #
 

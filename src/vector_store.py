@@ -1,16 +1,15 @@
 """
-ベクトルストア（ChromaDB + Gemini Embeddings）
-Firestore に保存された KB ドキュメントを意味検索可能にする。
-ローカルの output/chroma/ に永続化する。
+ベクトルストア（Firestore Vector Search + Gemini Embeddings）
+ChromaDB を廃止し、Firestore の findNearest を使ってクラウド上で意味検索を行う。
+embedding フィールドは context_snapshots コレクションの各ドキュメントに追記される。
+
+事前準備: Firestore ベクトルインデックスの作成が必要。
+  infra/create_vector_index.sh を実行してください。
 """
 import logging
-from pathlib import Path
 from typing import Callable
 
 logger = logging.getLogger(__name__)
-
-_PERSIST_DIR = "output/chroma"
-_COLLECTION_NAME = "weekly_relay"
 
 
 def _build_embed_text(doc_id: str, data: dict) -> str:
@@ -38,75 +37,56 @@ def _build_embed_text(doc_id: str, data: dict) -> str:
 
 
 class VectorStore:
-    """ChromaDB を使った KB 意味検索ストア"""
+    """Firestore Vector Search を使った KB 意味検索ストア。
+    ローカルファイルは一切使用しない。
+    """
 
-    def __init__(self, embed_fn: Callable[[str], list[float]]):
+    def __init__(self, embed_fn: Callable[[str], list[float]], firestore_client):
         """
-        embed_fn: text -> list[float]  の callable。
-                  GeminiClient.embed を渡す。
+        embed_fn        : text -> list[float] の callable（GeminiClient.embed）
+        firestore_client: FirestoreClient インスタンス
         """
-        import chromadb
-        Path(_PERSIST_DIR).mkdir(parents=True, exist_ok=True)
-        self._chroma = chromadb.PersistentClient(path=_PERSIST_DIR)
-        self._col = self._chroma.get_or_create_collection(
-            _COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
         self._embed = embed_fn
-        logger.info(f"VectorStore 初期化: {_PERSIST_DIR}  現在 {self._col.count()} 件")
+        self._fs = firestore_client
+        logger.info("VectorStore 初期化: Firestore Vector Search モード")
 
     # ------------------------------------------------------------------ #
 
     def upsert(self, doc_id: str, data: dict) -> None:
-        """ドキュメントを埋め込んでストアに保存（同 ID は上書き）"""
+        """ドキュメントを埋め込んで Firestore に保存（同 ID は上書き）"""
         text = _build_embed_text(doc_id, data)
         if not text:
             return
         try:
             embedding = self._embed(text)
-            meta: dict[str, str] = {
-                "source_type": data.get("source_type", ""),
-                "doc_id": doc_id,
-            }
-            for key in ("issue_key", "channel_name", "week_label", "display_name"):
-                val = data.get(key)
-                if val:
-                    meta[key] = str(val)
-            created = data.get("created_date")
-            if created:
-                meta["created_date"] = str(created)[:10]
-            self._col.upsert(
-                ids=[doc_id],
-                embeddings=[embedding],
-                documents=[text[:3000]],
-                metadatas=[meta],
-            )
+            self._fs.upsert_embedding(doc_id, embedding)
         except Exception as e:
             logger.warning(f"VectorStore upsert 失敗 ({doc_id}): {e}")
 
     def search(self, query: str, n_results: int = 5) -> list[dict]:
-        """クエリに意味的に近い KB ドキュメントを返す"""
-        total = self._col.count()
-        if total == 0:
-            return []
+        """クエリに意味的に近い KB ドキュメントを返す。
+        戻り値: [{"doc_id": str, "score": float, "text": str, "meta": dict}, ...]
+        """
         try:
             embedding = self._embed(query)
-            results = self._col.query(
-                query_embeddings=[embedding],
-                n_results=min(n_results, total),
-                include=["documents", "metadatas", "distances"],
-            )
+            raw = self._fs.vector_search(embedding, n_results)
             output = []
-            for doc_id, doc, meta, dist in zip(
-                results["ids"][0],
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
-            ):
+            for item in raw:
+                data = item.get("data", {})
+                # 表示用テキストを data から再構築
+                text = _build_embed_text(item["doc_id"], data)
+                meta = {
+                    "source_type": data.get("source_type", ""),
+                    "doc_id": item["doc_id"],
+                }
+                for key in ("issue_key", "channel_name", "week_label", "display_name"):
+                    val = data.get(key)
+                    if val:
+                        meta[key] = str(val)
                 output.append({
-                    "doc_id": doc_id,
-                    "score": round(1 - dist, 4),   # cosine similarity（1 = 完全一致）
-                    "text": doc,
+                    "doc_id": item["doc_id"],
+                    "score": item["score"],
+                    "text": text[:3000],
                     "meta": meta,
                 })
             return output
@@ -115,4 +95,8 @@ class VectorStore:
             return []
 
     def count(self) -> int:
-        return self._col.count()
+        """embedding フィールドを持つドキュメント数を返す"""
+        try:
+            return self._fs.count_embeddings()
+        except Exception:
+            return 0
