@@ -362,12 +362,13 @@ class GeminiClient:
             return ""
 
     def embed(self, text: str) -> list[float]:
-        """テキストを埋め込みベクトルに変換（text-embedding-004）"""
+        """テキストを埋め込みベクトルに変換（gemini-embedding-001, 768次元）"""
         if not self.enabled:
             raise RuntimeError("Gemini API が無効です（embed には API キーが必要）")
         result = self._client.models.embed_content(
             model="models/gemini-embedding-001",
             contents=text,
+            config={"output_dimensionality": 768},
         )
         return list(result.embeddings[0].values)
 
