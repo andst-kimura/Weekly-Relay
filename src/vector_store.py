@@ -1,15 +1,18 @@
 """
-ベクトルストア（Firestore Vector Search + Gemini Embeddings）
-ChromaDB を廃止し、Firestore の findNearest を使ってクラウド上で意味検索を行う。
-embedding フィールドは context_snapshots コレクションの各ドキュメントに追記される。
+ベクトルストア（ChromaDB ローカル実装）
 
-事前準備: Firestore ベクトルインデックスの作成が必要。
-  infra/create_vector_index.sh を実行してください。
+NOTE: セキュリティレビュー対応のため Firestore Vector Search から
+      ローカル ChromaDB に一時的に差し戻し。
+      Firestore Vector Search への再切り替えは下部のコメントアウトを参照。
 """
 import logging
+import os
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+_PERSIST_DIR = "output/chroma"
+_COLLECTION_NAME = "wasabi_kb"
 
 
 def _build_embed_text(doc_id: str, data: dict) -> str:
@@ -37,29 +40,53 @@ def _build_embed_text(doc_id: str, data: dict) -> str:
 
 
 class VectorStore:
-    """Firestore Vector Search を使った KB 意味検索ストア。
-    ローカルファイルは一切使用しない。
+    """ChromaDB を使ったローカルベクトルストア。
+
+    引数:
+        embed_fn        : text -> list[float] の callable（GeminiClient.embed）
+        firestore_client: 現在は未使用（Firestore Vector Search 切り替え時に使用）
     """
 
-    def __init__(self, embed_fn: Callable[[str], list[float]], firestore_client):
-        """
-        embed_fn        : text -> list[float] の callable（GeminiClient.embed）
-        firestore_client: FirestoreClient インスタンス
-        """
+    def __init__(self, embed_fn: Callable[[str], list[float]], firestore_client=None):
+        import chromadb
+        from chromadb.utils.embedding_functions import EmbeddingFunction
+
         self._embed = embed_fn
-        self._fs = firestore_client
-        logger.info("VectorStore 初期化: Firestore Vector Search モード")
+        os.makedirs(_PERSIST_DIR, exist_ok=True)
+        self._chroma = chromadb.PersistentClient(path=_PERSIST_DIR)
+
+        class _GeminiEF(EmbeddingFunction):
+            def __call__(self_, texts):
+                return [embed_fn(t) for t in texts]
+
+        self._col = self._chroma.get_or_create_collection(
+            _COLLECTION_NAME,
+            embedding_function=_GeminiEF(),
+            metadata={"hnsw:space": "cosine"},
+        )
+        logger.info(f"VectorStore 初期化: ChromaDB ローカル ({_PERSIST_DIR}, {self._col.count()} 件)")
 
     # ------------------------------------------------------------------ #
 
     def upsert(self, doc_id: str, data: dict) -> None:
-        """ドキュメントを埋め込んで Firestore に保存（同 ID は上書き）"""
+        """ドキュメントを埋め込んで ChromaDB に保存（同 ID は上書き）"""
         text = _build_embed_text(doc_id, data)
         if not text:
             return
         try:
-            embedding = self._embed(text)
-            self._fs.upsert_embedding(doc_id, embedding)
+            meta = {
+                "source_type": str(data.get("source_type", "")),
+                "doc_id": doc_id,
+            }
+            for key in ("issue_key", "channel_name", "week_label", "display_name"):
+                val = data.get(key)
+                if val:
+                    meta[key] = str(val)
+            self._col.upsert(
+                ids=[doc_id],
+                documents=[text],
+                metadatas=[meta],
+            )
         except Exception as e:
             logger.warning(f"VectorStore upsert 失敗 ({doc_id}): {e}")
 
@@ -68,25 +95,24 @@ class VectorStore:
         戻り値: [{"doc_id": str, "score": float, "text": str, "meta": dict}, ...]
         """
         try:
-            embedding = self._embed(query)
-            raw = self._fs.vector_search(embedding, n_results)
+            total = self._col.count()
+            if total == 0:
+                return []
+            res = self._col.query(
+                query_texts=[query],
+                n_results=min(n_results, total),
+                include=["documents", "metadatas", "distances"],
+            )
             output = []
-            for item in raw:
-                data = item.get("data", {})
-                # 表示用テキストを data から再構築
-                text = _build_embed_text(item["doc_id"], data)
-                meta = {
-                    "source_type": data.get("source_type", ""),
-                    "doc_id": item["doc_id"],
-                }
-                for key in ("issue_key", "channel_name", "week_label", "display_name"):
-                    val = data.get(key)
-                    if val:
-                        meta[key] = str(val)
+            for doc_text, meta, dist in zip(
+                res["documents"][0],
+                res["metadatas"][0],
+                res["distances"][0],
+            ):
                 output.append({
-                    "doc_id": item["doc_id"],
-                    "score": item["score"],
-                    "text": text[:3000],
+                    "doc_id": meta.get("doc_id", ""),
+                    "score": round(1.0 - dist, 4),
+                    "text": doc_text[:3000],
                     "meta": meta,
                 })
             return output
@@ -95,8 +121,66 @@ class VectorStore:
             return []
 
     def count(self) -> int:
-        """embedding フィールドを持つドキュメント数を返す"""
+        """インデックス済みドキュメント数を返す"""
         try:
-            return self._fs.count_embeddings()
+            return self._col.count()
         except Exception:
             return 0
+
+
+# ======================================================================
+# Firestore Vector Search 実装（セキュリティレビュー対応のためコメントアウト）
+# 再有効化する場合:
+#   1. 上記 ChromaDB クラスをコメントアウト
+#   2. 下記クラスのコメントを外す
+#   3. firestore_client.py の upsert_embedding / vector_search / count_embeddings を復元
+#   4. main.py の VectorStore(firestore_client=...) 引数を復元
+# ======================================================================
+
+# class VectorStore:
+#     """Firestore Vector Search を使ったクラウドベクトルストア。"""
+#
+#     def __init__(self, embed_fn: Callable[[str], list[float]], firestore_client):
+#         self._embed = embed_fn
+#         self._fs = firestore_client
+#         logger.info("VectorStore 初期化: Firestore Vector Search モード")
+#
+#     def upsert(self, doc_id: str, data: dict) -> None:
+#         text = _build_embed_text(doc_id, data)
+#         if not text:
+#             return
+#         try:
+#             embedding = self._embed(text)
+#             self._fs.upsert_embedding(doc_id, embedding)
+#         except Exception as e:
+#             logger.warning(f"VectorStore upsert 失敗 ({doc_id}): {e}")
+#
+#     def search(self, query: str, n_results: int = 5) -> list[dict]:
+#         try:
+#             embedding = self._embed(query)
+#             raw = self._fs.vector_search(embedding, n_results)
+#             output = []
+#             for item in raw:
+#                 data = item.get("data", {})
+#                 text = _build_embed_text(item["doc_id"], data)
+#                 meta = {"source_type": data.get("source_type", ""), "doc_id": item["doc_id"]}
+#                 for key in ("issue_key", "channel_name", "week_label", "display_name"):
+#                     val = data.get(key)
+#                     if val:
+#                         meta[key] = str(val)
+#                 output.append({
+#                     "doc_id": item["doc_id"],
+#                     "score": item["score"],
+#                     "text": text[:3000],
+#                     "meta": meta,
+#                 })
+#             return output
+#         except Exception as e:
+#             logger.warning(f"VectorStore search 失敗: {e}")
+#             return []
+#
+#     def count(self) -> int:
+#         try:
+#             return self._fs.count_embeddings()
+#         except Exception:
+#             return 0

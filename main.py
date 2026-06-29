@@ -280,7 +280,7 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
         vector_store = None
         if gemini_client.enabled:
             from src.vector_store import VectorStore
-            vector_store = VectorStore(embed_fn=gemini_client.embed, firestore_client=firestore_client)
+            vector_store = VectorStore(embed_fn=gemini_client.embed)
         kb = KnowledgeBase(
             backlog_client=backlog_client,
             slack_client=slack_client,
@@ -592,7 +592,7 @@ def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> Non
         vector_store = None
         if gemini.enabled:
             from src.vector_store import VectorStore
-            vector_store = VectorStore(embed_fn=gemini.embed, firestore_client=fs)
+            vector_store = VectorStore(embed_fn=gemini.embed)
 
         kb = KnowledgeBase(backlog_client=bc, slack_client=sc,
                            gemini_client=gemini, firestore_client=fs,
@@ -671,8 +671,7 @@ def main():
             logger.error("--search には gemini.enabled: true が必要です")
             return
         from src.vector_store import VectorStore
-        fs = FirestoreClient()
-        vs = VectorStore(embed_fn=gemini.embed, firestore_client=fs)
+        vs = VectorStore(embed_fn=gemini.embed)
         logger.info(f"🔍 \"{args.search}\" を検索中 ... （{vs.count()} 件インデックス済み）")
         results = vs.search(args.search, n_results=5)
         if not results:
@@ -716,7 +715,7 @@ def main():
         from src.slack_bot import SlackBot
         cfg_fs = config.get("firestore", {})
         fs_client = FirestoreClient() if cfg_fs.get("enabled", False) else None
-        vs = VectorStore(embed_fn=gemini.embed, firestore_client=fs_client)
+        vs = VectorStore(embed_fn=gemini.embed)
 
         # Backlog クライアント（共有事項起票用）
         cfg_bl = config.get("backlog", {})
@@ -773,7 +772,7 @@ def main():
             return
         from src.vector_store import VectorStore
         fs = FirestoreClient()
-        vs = VectorStore(embed_fn=gemini.embed, firestore_client=fs)
+        vs = VectorStore(embed_fn=gemini.embed)
         docs = fs.list_context_snapshots()
         logger.info(f"Firestore から {len(docs)} 件取得、ベクトルインデックス同期開始 ...")
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
