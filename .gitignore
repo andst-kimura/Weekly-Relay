@@ -2,6 +2,11 @@
 .env
 config/google_credentials.json
 config/google_token.pickle
+config/andst-hd-ax-*.json
+config/gcp-sa-credentials.json/
+
+# Office 一時ファイル
+docs/~$*.docx
 
 # Python
 __pycache__/

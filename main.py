@@ -2,6 +2,12 @@
 週次進捗報告 自動化ツール - メインスクリプト
 毎週金曜18時に自動実行、または手動実行可能
 """
+import sys, io
+# Windows 環境で stdout/stderr を UTF-8 に強制（cp932 によるサロゲートエラー回避）
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import truststore
 truststore.inject_into_ssl()  # Windows証明書ストアを使用（社内プロキシ対応）
 
@@ -31,7 +37,8 @@ from src.daily_summary import DailySummary
 from src.google_docs_client import GoogleDocsClient
 from src.gemini_client import GeminiClient
 from src.cleanup import CleanupTool
-from src.firestore_client import FirestoreClient
+# weekly-relay Firestore は廃止済み。SmartSync Firestore（wasabi_* コレクション）を使用
+from src.smartsync_store import SmartSyncStore as FirestoreClient
 
 # ログ設定
 Path("output").mkdir(exist_ok=True)
@@ -756,12 +763,12 @@ def main():
         bot.run()
         return
 
-    # Firestore → ChromaDB 全件同期
+    # SmartSync Firestore → embedding バックフィル（全件 or 差分）
     if args.sync_vectors:
         cfg_gemini = config.get("gemini", {})
-        cfg_fs = config.get("firestore", {})
-        if not cfg_fs.get("enabled", False):
-            logger.error("--sync-vectors には firestore.enabled: true が必要です")
+        cfg_ss = config.get("smartsync_firestore", {})
+        if not cfg_ss.get("enabled", False):
+            logger.error("--sync-vectors には smartsync_firestore.enabled: true が必要です")
             return
         gemini = GeminiClient(
             api_key=cfg_gemini.get("api_key", "") if cfg_gemini.get("enabled", False) else "",
@@ -771,18 +778,25 @@ def main():
             logger.error("--sync-vectors には gemini.enabled: true が必要です")
             return
         from src.vector_store import VectorStore
-        fs = FirestoreClient()
+        from src.smartsync_client import list_context_snapshots_without_embedding
         vs = VectorStore(embed_fn=gemini.embed)
-        docs = fs.list_context_snapshots()
-        logger.info(f"Firestore から {len(docs)} 件取得、ベクトルインデックス同期開始 ...")
+        docs = list_context_snapshots_without_embedding()
+        if not docs:
+            logger.info("embedding 未設定のドキュメントはありません（すべて同期済み）")
+            logger.info(f"現在の embedding 済み件数: {vs.count()} 件")
+            return
+        logger.info(f"embedding 未設定: {len(docs)} 件 → バックフィル開始 ...")
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-        with ThreadPoolExecutor(max_workers=5) as ex:
+        with ThreadPoolExecutor(max_workers=3) as ex:
             futures = {ex.submit(vs.upsert, doc_id, data): doc_id for doc_id, data in docs}
             for i, future in enumerate(_as_completed(futures), 1):
-                future.result()
-                if i % 20 == 0:
-                    logger.info(f"  {i}/{len(docs)} 件完了 ...")
-        logger.info(f"同期完了: {vs.count()} 件のベクトルインデックスが Firestore に存在")
+                doc_id = futures[future]
+                try:
+                    future.result()
+                    logger.info(f"  [{i}/{len(docs)}] {doc_id} ✅")
+                except Exception as e:
+                    logger.warning(f"  [{i}/{len(docs)}] {doc_id} ❌ {e}")
+        logger.info(f"バックフィル完了: embedding 済み {vs.count()} 件")
         return
 
     # ユーザーID確認モード

@@ -143,7 +143,8 @@ slack_bot:
     - シン-オープン化-
     - バリューチェーンdx推進_all
     - 販売チーム_物流
-
+    -
+    
 # --- Google Calendar 設定 ---
 google_calendar:
   credentials_file: "config/google_credentials.json"  # OAuthクレデンシャルJSON
@@ -151,12 +152,24 @@ google_calendar:
     - "primary"                             # メインカレンダー（追加カレンダーはIDを追加）
 
 # --- Firestore 設定 ---
-# 個人用 GCP プロジェクト（weekly-relay）の Firestore を使用
+# weekly-relay Firestore は廃止済み。
+# enabled は SmartSyncStore（SmartSync Firestore の wasabi_* コレクション）の
+# 初期化を制御するフラグとして継続使用する。
+# 接続先は下の smartsync_firestore セクション（andst-hd-ax）の設定に従う。
 firestore:
   enabled: true
-  # 環境変数で上書き可能（GOOGLE_CLOUD_PROJECT / FIRESTORE_DATABASE）
-  project: "weekly-relay"
-  database: "weekly-relay"
+
+# --- SmartSync Firestore 設定 ---
+# SmartSync チームの GCP プロジェクト（andst-hd-ax）を参照
+# ・ベクトル検索（RAG）のデータソース
+# ・KB（context_snapshots）・週次レポート・手動メモ等の保存先（wasabi_* コレクション）
+smartsync_firestore:
+  enabled: true
+  project: "andst-hd-ax"
+  # 検証環境: smart-sync-stg / 本番環境: smart-sync
+  database: "${SMARTSYNC_FIRESTORE_DATABASE}"
+  # サービスアカウントキーのパス（環境変数で上書き可）
+  credentials: "${SMARTSYNC_GOOGLE_APPLICATION_CREDENTIALS}"
 
 # --- レポート設定 ---
 report:

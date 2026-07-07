@@ -1,9 +1,12 @@
 """
 ナレッジベース生成モジュール
-チケット / Slack / 議事録を Firestore の context_snapshots コレクションへ蓄積する。
+チケット / Slack / 議事録を SmartSync Firestore の context_snapshots へ蓄積する。
+
+Wasabi 形式で組み立てたデータを smartsync_convert で SmartSync 形式に変換し、
+doc_id = wasabi_sales_{source_type}_{source_key} で書き込む（embedding も同時付与）。
 
 チケット KB は ThreadPoolExecutor で並列フェッチし、
-Firestore に保存済みの backlog_updated_at と比較して変化のないチケットをスキップする。
+SmartSync に保存済みの backlog_updated_at と比較して変化のないチケットをスキップする。
 """
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
@@ -12,6 +15,7 @@ import logging
 
 from src.backlog_client import BacklogClient
 from src.slack_client import SlackClient
+from src import smartsync_client, smartsync_convert
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,22 @@ class KnowledgeBase:
         logger.info("ナレッジベース生成完了")
 
     # ------------------------------------------------------------------ #
+    #  SmartSync への保存（共通）
+    # ------------------------------------------------------------------ #
+
+    def _save_to_smartsync(self, wasabi_doc_id: str, data: dict, label: str) -> None:
+        """Wasabi 形式データを SmartSync 形式に変換して保存し、embedding を付与する"""
+        converted = smartsync_convert.convert(wasabi_doc_id, data)
+        if not converted:
+            logger.warning(f"{label} KB変換不可のためスキップ: {wasabi_doc_id}")
+            return
+        ss_doc_id, ss_data = converted
+        smartsync_client.save_context_snapshot(ss_doc_id, ss_data)
+        logger.info(f"{label} KB保存: {ss_doc_id}")
+        if self.vs:
+            self.vs.upsert(ss_doc_id, ss_data)
+
+    # ------------------------------------------------------------------ #
     #  チケット別ナレッジ
     # ------------------------------------------------------------------ #
 
@@ -82,10 +102,14 @@ class KnowledgeBase:
         """1チケットの処理（差分スキップ → Backlog API → Firestore 保存）"""
         backlog_updated_at = (act.get("updated") or "")[:19]  # "YYYY-MM-DDTHH:MM:SS"
 
-        # ② 差分スキップ: Firestoreの保存済み updated_at と比較
-        if self.fs and backlog_updated_at:
-            doc_id = f"ticket_{issue_key}"
-            existing = self.fs.get_context_snapshot(doc_id)
+        # ② 差分スキップ: SmartSync の保存済み updated_at と比較
+        if backlog_updated_at:
+            ss_doc_id = f"{smartsync_convert.WASABI_PROJECT_ID}_backlog_{issue_key}"
+            try:
+                existing = smartsync_client.get_context_snapshot(ss_doc_id)
+            except Exception as e:
+                logger.warning(f"SmartSync 参照失敗（スキップ判定なしで続行）: {e}")
+                existing = None
             if existing and existing.get("backlog_updated_at") == backlog_updated_at:
                 logger.info(f"チケットKBスキップ（変更なし）: {issue_key}")
                 return
@@ -137,14 +161,7 @@ class KnowledgeBase:
             ],
         }
 
-        doc_id = f"ticket_{issue_key}"
-        if self.fs:
-            self.fs.save_context_snapshot(doc_id, data)
-            logger.info(f"チケットKB保存: {doc_id}")
-        else:
-            logger.warning(f"FirestoreClient 未設定のためチケットKBをスキップ: {issue_key}")
-        if self.vs:
-            self.vs.upsert(doc_id, data)
+        self._save_to_smartsync(f"ticket_{issue_key}", data, "チケット")
 
     # ------------------------------------------------------------------ #
     #  Slack チャンネル別ナレッジ
@@ -262,13 +279,7 @@ class KnowledgeBase:
             ],
         }
 
-        if self.fs:
-            self.fs.save_context_snapshot(doc_id, data)
-            logger.info(f"Slack KB保存: {doc_id}")
-        else:
-            logger.warning(f"FirestoreClient 未設定のためSlack KBをスキップ: {doc_id}")
-        if self.vs:
-            self.vs.upsert(doc_id, data)
+        self._save_to_smartsync(doc_id, data, "Slack")
 
     # ------------------------------------------------------------------ #
     #  議事録ナレッジ
@@ -313,13 +324,7 @@ class KnowledgeBase:
             "ai_summary": ai_summary,
         }
 
-        if self.fs:
-            self.fs.save_context_snapshot(doc_id, data)
-            logger.info(f"議事録KB保存: {doc_id}")
-        else:
-            logger.warning(f"FirestoreClient 未設定のため議事録KBをスキップ: {doc_id}")
-        if self.vs:
-            self.vs.upsert(doc_id, data)
+        self._save_to_smartsync(doc_id, data, "議事録")
 
     # ------------------------------------------------------------------ #
     #  ユーティリティ

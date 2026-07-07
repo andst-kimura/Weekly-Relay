@@ -1,5 +1,10 @@
 """
-Firestore クライアント（REST 実装）
+【DEPRECATED】weekly-relay Firestore クライアント（REST 実装）
+
+weekly-relay Firestore は廃止済み。新規の読み書きには src/smartsync_store.py の
+SmartSyncStore（SmartSync Firestore / wasabi_* コレクション）を使用すること。
+本モジュールは過去データの読み取り（scripts/migrate_*.py）のためにのみ残している。
+
 google-cloud-firestore SDK の gRPC を使わず、Firestore REST API を直接呼ぶ。
 社内プロキシ環境では gRPC の boringSSL が証明書検証に失敗するため、
 Python 標準の requests（urllib3 + certifi）を使用して SSL 問題を回避する。
