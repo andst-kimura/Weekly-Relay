@@ -1,0 +1,5 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'asia-northeast1-docker.pkg.dev/andst-hd-ax/smart-sync/wasabi-webapp:latest', '-f', 'webapp/Dockerfile', '.']
+images:
+- 'asia-northeast1-docker.pkg.dev/andst-hd-ax/smart-sync/wasabi-webapp:latest'

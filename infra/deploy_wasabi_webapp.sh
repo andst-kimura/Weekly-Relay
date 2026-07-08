@@ -11,7 +11,8 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/smart-sync/${SERVICE}:latest"
 SA_EMAIL="smart-sync-sa@${PROJECT_ID}.iam.gserviceaccount.com"   # 専用 SA を作る場合は変更
 
 echo "=== build & push ==="
-gcloud builds submit --tag "${IMAGE}" --project "${PROJECT_ID}" .
+# Dockerfile が webapp/ 配下にあるため cloudbuild 設定経由でビルドする
+gcloud builds submit --config infra/cloudbuild_webapp.yaml --project "${PROJECT_ID}" .
 
 echo "=== deploy ==="
 gcloud run deploy "${SERVICE}" \
