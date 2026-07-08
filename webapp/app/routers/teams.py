@@ -144,12 +144,18 @@ async def add_mapping(team_id: str, data: dict, user: CurrentUser = Depends(requ
             raise HTTPException(status_code=400, detail=f"Backlog 課題 {issue_key} が見つかりません")
 
     mapping = dict(team.get("channel_mapping") or {})
+    existing = mapping.get(channel_name) or {}
+    # 既存マッピングとマージ（編集時に未送信フィールドを消さない）
     mapping[channel_name] = {
-        "channel_id": (data.get("channel_id") or "").strip(),
+        "channel_id": (data.get("channel_id") or existing.get("channel_id") or "").strip(),
         "parent_issue_key": issue_key,
-        "label": label,
-        "project_key": (data.get("project_key") or "").strip(),
-        "related_meeting_keywords": data.get("related_meeting_keywords") or [],
+        "label": label or existing.get("label", ""),
+        "project_key": (data.get("project_key") or existing.get("project_key") or "").strip(),
+        "related_meeting_keywords": (
+            data.get("related_meeting_keywords")
+            if data.get("related_meeting_keywords") is not None
+            else existing.get("related_meeting_keywords") or []
+        ),
     }
 
     merged = {**{k: v for k, v in team.items() if k not in ("team_id", "updated_at", "updated_by")},

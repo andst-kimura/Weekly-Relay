@@ -163,15 +163,51 @@ function renderMappings() {
     tbody.innerHTML = '<tr><td colspan="6" class="text-muted small">マッピングなし（すべて自動判別で転記されます）</td></tr>';
     return;
   }
-  tbody.innerHTML = entries.map(([ch, m]) => `
-    <tr>
+  tbody.innerHTML = entries.map(([ch, m], i) => `
+    <tr id="map-row-${i}">
       <td>#${ch}</td>
       <td class="small text-muted">${m.channel_id || "—"}</td>
       <td>${m.parent_issue_key || '<span class="text-muted">自動判別</span>'}</td>
       <td class="small">${m.label || ""}</td>
       <td class="small text-muted">${(m.related_meeting_keywords || []).join(", ")}</td>
-      <td>${IS_ADMIN ? `<button class="btn btn-sm btn-outline-danger" onclick="deleteMapping('${ch}')">削除</button>` : ""}</td>
+      <td>${IS_ADMIN ? `
+        <button class="btn btn-sm btn-outline-secondary" onclick="editMapping(${i})">編集</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="deleteMapping('${ch}')">削除</button>` : ""}</td>
     </tr>`).join("");
+}
+
+function editMapping(idx) {
+  const entries = Object.entries(TEAM.channel_mapping || {});
+  const [ch, m] = entries[idx] || [];
+  if (!ch) return;
+  const row = document.getElementById(`map-row-${idx}`);
+  row.innerHTML = `
+    <td>#${ch}<input type="hidden" id="em-channel-${idx}" value="${ch}"></td>
+    <td><input class="form-control form-control-sm" id="em-channel-id-${idx}" value="${m.channel_id || ""}" placeholder="C04..."></td>
+    <td><input class="form-control form-control-sm" id="em-issue-${idx}" value="${m.parent_issue_key || ""}" placeholder="SALES_TEAM-27（空=自動判別）"></td>
+    <td><input class="form-control form-control-sm" id="em-label-${idx}" value="${(m.label || "").replace(/"/g, "&quot;")}"></td>
+    <td><input class="form-control form-control-sm" id="em-keywords-${idx}"
+         value="${(m.related_meeting_keywords || []).join(", ")}" placeholder="カンマ区切り"></td>
+    <td>
+      <button class="btn btn-sm btn-wasabi" onclick="saveMapping(${idx})">保存</button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="renderMappings()">取消</button>
+    </td>`;
+}
+
+async function saveMapping(idx) {
+  try {
+    const body = {
+      channel_name: document.getElementById(`em-channel-${idx}`).value,
+      channel_id: document.getElementById(`em-channel-id-${idx}`).value.trim(),
+      parent_issue_key: document.getElementById(`em-issue-${idx}`).value.trim(),
+      label: document.getElementById(`em-label-${idx}`).value.trim(),
+      related_meeting_keywords: document.getElementById(`em-keywords-${idx}`).value
+        .split(",").map(s => s.trim()).filter(Boolean),
+    };
+    const r = await api(`/api/teams/${TEAM_ID}/mappings`, { method: "POST", body: JSON.stringify(body) });
+    toast(`マッピングを更新しました${r.label ? `（${r.label}）` : ""}`);
+    loadTeam();
+  } catch (e) { toast(e.message, false); }
 }
 
 function renderMembers() {
