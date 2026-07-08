@@ -17,7 +17,9 @@ import logging
 import re
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+JST_TZ = timezone(timedelta(hours=9))
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,8 @@ _SHARED_INFO_PREFIXES = ("共有事項", "共有", "shared")
 _COLLECT_PREFIXES = ("議事録収集", "議事録取得", "minutes")
 _KB_COLLECT_PREFIXES = ("情報収集", "kb収集", "全収集", "collect")
 _POST_PREFIXES = ("backlog転記", "転記", "post")
+_SETTINGS_PREFIXES = ("設定確認", "設定", "config")
+_MYID_PREFIXES = ("私のid", "自分のid", "myid", "my id")
 # 期間指定パターン（例: 7/1-7/7, 07/01〜07/07）
 _RANGE_RE = re.compile(
     r"(?P<m1>\d{1,2})/(?P<d1>\d{1,2})\s*[-〜~]\s*(?P<m2>\d{1,2})/(?P<d2>\d{1,2})"
@@ -63,6 +67,15 @@ _HELP_TEXT = """\
 *Backlog 転記（週次レポートを Backlog へ手動転記）*
 　`@Wasabi Bot 転記`（今週分。プレビュー確認後にボタンで実行）
 　`@Wasabi Bot 転記 7/1-7/4`（期間指定）
+
+*設定（チーム設定の確認・簡易変更）*
+　`@Wasabi Bot 設定確認`（全員可）
+　`@Wasabi Bot 設定 転記 オン/オフ`（チーム管理者のみ）
+　`@Wasabi Bot 設定 マッピング SALES_TEAM-27`（対象チャンネル内で・チーム管理者のみ）
+　`@Wasabi Bot 設定 マッピング削除`（同上）
+
+*私のID（メンバー登録用）*
+　`@Wasabi Bot 私のID` → あなたの Slack ID を返します
 
 *Bot 返信の削除（チャンネル）*
 　返信スレッド内で `@Wasabi Bot delete` と送信
@@ -127,6 +140,15 @@ def _build_home_blocks() -> list[dict]:
             "```転記               … 今週分\n転記 7/1-7/4       … 期間指定```"
         ),
         {"type": "divider"},
+        {"type": "header", "text": {"type": "plain_text", "text": "⚙️ 設定コマンド"}},
+        section(
+            "```設定確認                       … 現在のチーム設定を表示（全員可）\n"
+            "設定 転記 オン/オフ             … 転記機能の切替（チーム管理者）\n"
+            "設定 マッピング SALES_TEAM-27  … このチャンネルの転記先を設定（チーム管理者）\n"
+            "設定 マッピング削除             … このチャンネルの転記先を解除（チーム管理者）\n"
+            "私のID                          … 自分の Slack ID を確認```"
+        ),
+        {"type": "divider"},
         section(
             "*その他*\n"
             "・`ヘルプ` … コマンド一覧を表示\n"
@@ -179,6 +201,8 @@ class SlackBot:
         # 手動実行ジョブ用（議事録収集・転記）
         self._config = config or {}
         self._job_running = False
+        # 実行中ジョブの完了待ちリスト: [(say_fn, kwargs), ...]
+        self._job_waiters: list[tuple] = []
         # 転記プレビュー保持: pending_id → prepared dict
         self._pending_posts: dict[str, dict] = {}
 
@@ -338,7 +362,8 @@ class SlackBot:
             say_fn(text="⚠️ Bot に config が渡されていないため実行できません。", **kwargs)
             return
         if self._job_running:
-            say_fn(text="⏳ 別のジョブが実行中です。完了までお待ちください。", **kwargs)
+            self._job_waiters.append((say_fn, kwargs))
+            say_fn(text="⏳ 現在別の収集ジョブが実行中です。完了したらお知らせします。", **kwargs)
             return
 
         since, until = _parse_range(raw_text)
@@ -362,10 +387,13 @@ class SlackBot:
                     lines += [f"　・{e}" for e in result["errors"]]
                 if result["count"] == 0 and not result["errors"]:
                     lines = [f"議事録は見つかりませんでした（{since.strftime('%m/%d')}〜{until.strftime('%m/%d')}）"]
-                say_fn(text="\n".join(lines), **kwargs)
+                message = "\n".join(lines)
+                say_fn(text=message, **kwargs)
+                self._notify_waiters(message)
             except Exception as e:
                 logger.error(f"議事録収集失敗: {e}")
                 say_fn(text=f"⚠️ 議事録収集に失敗しました: {e}", **kwargs)
+                self._notify_waiters(f"⚠️ 実行中だった議事録収集は失敗しました: {e}")
             finally:
                 self._job_running = False
 
@@ -375,14 +403,167 @@ class SlackBot:
     #  手動実行: 全 KB 収集（Backlog + Slack + 議事録）
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    #  設定コマンド（wasabi_teams の簡易設定）
+    # ------------------------------------------------------------------ #
+
+    def _is_team_admin(self, team: dict, slack_user_id: str) -> bool:
+        return slack_user_id in (team.get("admin_slack_ids") or [])
+
+    def _channel_name(self, channel_id: str) -> str:
+        """チャンネル ID から名前を取得する（DM の場合は空文字）"""
+        if not channel_id or channel_id.startswith("D"):
+            return ""
+        cached = getattr(self, "_channel_name_cache", None)
+        if cached is None:
+            cached = self._channel_name_cache = {}
+        if channel_id in cached:
+            return cached[channel_id]
+        try:
+            from slack_sdk import WebClient
+            info = WebClient(token=self._bot_token).conversations_info(channel=channel_id)
+            name = info.get("channel", {}).get("name", "")
+        except Exception as e:
+            logger.warning(f"チャンネル名取得失敗 ({channel_id}): {e}")
+            name = ""
+        cached[channel_id] = name
+        return name
+
+    def _handle_settings(self, raw_text: str, slack_user_id: str,
+                          channel: str, channel_name: str) -> str:
+        """設定コマンドを処理する。
+
+        設定確認                       … 閲覧（全員可）
+        設定 転記 オン/オフ            … 転記機能の切替（チーム管理者のみ）
+        設定 マッピング SALES_TEAM-27  … 実行チャンネルをマッピング（チーム管理者のみ）
+        設定 マッピング削除            … 実行チャンネルのマッピング解除（チーム管理者のみ）
+        """
+        from src.team_config import load_team, save_team, write_audit
+
+        team = load_team(config=self._config)
+        team_id = team.get("team_id", "sales")
+
+        # プレフィックス除去
+        text = raw_text
+        for prefix in ("設定確認", "設定", "config"):
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].strip(" 　")
+                break
+
+        # --- 設定確認（引数なし or「確認」）---
+        if not text or text in ("確認", "show"):
+            mapping = team.get("channel_mapping") or {}
+            mapped = [f"　　#{ch} → {m.get('parent_issue_key') or '（自動判別）'}"
+                      for ch, m in mapping.items() if m.get("parent_issue_key")]
+            return (
+                f"⚙️ *{team.get('team_name', team_id)} の設定*\n"
+                f"・転記機能: {'✅ 有効' if team.get('transfer_enabled') else '❌ 無効'}\n"
+                f"・転記先: {team.get('report_project_key') or '未設定'}\n"
+                f"・チャンネルマッピング: {len(mapping)} 件（うち明示転記先 {len(mapped)} 件）\n"
+                + ("\n".join(mapped) + "\n" if mapped else "")
+                + f"・メンバー: {len(team.get('members') or [])} 名\n"
+                f"詳細な編集は管理画面から行えます。"
+            )
+
+        # --- 以降は変更系（チーム管理者のみ）---
+        if not self._is_team_admin(team, slack_user_id):
+            return ("⚠️ 設定の変更にはチーム管理者権限が必要です。\n"
+                    "管理者は管理画面の「Bot 設定コマンド許可」で追加できます。")
+
+        # --- 転記 オン/オフ ---
+        m = re.match(r"転記\s*(オン|オフ|on|off|有効|無効)$", text, re.IGNORECASE)
+        if m:
+            val = m.group(1).lower() in ("オン", "on", "有効")
+            merged = {k: v for k, v in team.items() if k not in ("team_id", "updated_at", "updated_by")}
+            merged["transfer_enabled"] = val
+            save_team(team_id, merged, updated_by=f"slack:{slack_user_id}")
+            write_audit(f"slack:{slack_user_id}", "update_transfer_enabled", team_id, {"value": val})
+            return (f"✅ 転記機能を{'有効' if val else '無効'}にしました。"
+                    + ("" if val else "週次実行では KB 収集のみ行います。"))
+
+        # --- マッピング削除（このチャンネル）---
+        if text in ("マッピング削除", "mapping delete"):
+            if not channel_name:
+                return "⚠️ このコマンドは対象チャンネル内で実行してください（DM では使えません）。"
+            mapping = dict(team.get("channel_mapping") or {})
+            if channel_name not in mapping:
+                return f"#{channel_name} のマッピングは登録されていません。"
+            del mapping[channel_name]
+            merged = {k: v for k, v in team.items() if k not in ("team_id", "updated_at", "updated_by")}
+            merged["channel_mapping"] = mapping
+            save_team(team_id, merged, updated_by=f"slack:{slack_user_id}")
+            write_audit(f"slack:{slack_user_id}", "delete_mapping", team_id, {"channel": channel_name})
+            return f"✅ #{channel_name} のマッピングを削除しました。"
+
+        # --- マッピング追加（このチャンネル → 課題キー）---
+        m = re.match(r"マッピング\s+([A-Z][A-Z0-9_]+-\d+)$", text)
+        if m:
+            issue_key = m.group(1)
+            if not channel_name:
+                return "⚠️ このコマンドは対象チャンネル内で実行してください（DM では使えません）。"
+            # Backlog で実在検証 + 課題名取得
+            label = ""
+            if self.bl:
+                try:
+                    issue = self.bl.get_issue(issue_key)
+                    label = issue.get("summary", "")[:60]
+                except Exception:
+                    return f"⚠️ Backlog 課題 {issue_key} が見つかりません。"
+            mapping = dict(team.get("channel_mapping") or {})
+            mapping[channel_name] = {
+                **(mapping.get(channel_name) or {}),
+                "channel_id": channel,
+                "parent_issue_key": issue_key,
+                "label": label,
+            }
+            merged = {k: v for k, v in team.items() if k not in ("team_id", "updated_at", "updated_by")}
+            merged["channel_mapping"] = mapping
+            save_team(team_id, merged, updated_by=f"slack:{slack_user_id}")
+            write_audit(f"slack:{slack_user_id}", "add_mapping", team_id,
+                        {"channel": channel_name, "issue": issue_key})
+            return (f"✅ マッピングを設定しました\n"
+                    f"　#{channel_name} → {issue_key}{f'（{label}）' if label else ''}")
+
+        return ("設定コマンドの使い方:\n"
+                "・`設定確認` … 現在の設定を表示\n"
+                "・`設定 転記 オン` / `設定 転記 オフ`\n"
+                "・（チャンネル内で）`設定 マッピング SALES_TEAM-27`\n"
+                "・（チャンネル内で）`設定 マッピング削除`")
+
+    def _notify_waiters(self, message: str) -> None:
+        """ジョブ完了を待っている全ユーザーへ通知する"""
+        waiters, self._job_waiters = self._job_waiters, []
+        for w_say, w_kwargs in waiters:
+            try:
+                w_say(text=message, **w_kwargs)
+            except Exception as e:
+                logger.warning(f"待機者への通知失敗: {e}")
+
     def _handle_collect_kb(self, raw_text: str, say_fn, kwargs: dict) -> None:
         """Backlog・Slack・議事録の全収集をバックグラウンドで実行する"""
         if not self._config:
             say_fn(text="⚠️ Bot に config が渡されていないため実行できません。", **kwargs)
             return
         if self._job_running:
-            say_fn(text="⏳ 別のジョブが実行中です。完了までお待ちください。", **kwargs)
+            # 完了待ちリストに登録し、完了時に通知する
+            self._job_waiters.append((say_fn, kwargs))
+            say_fn(text="⏳ 現在別の収集ジョブが実行中です。完了したらお知らせします。", **kwargs)
             return
+
+        from src.manual_jobs import is_fresh, FRESHNESS_MINUTES
+        has_range = bool(_RANGE_RE.search(raw_text))
+        if not has_range:
+            # 期間指定なしの場合のみ鮮度チェック（明示指定は意図があるとみなし実行）
+            fresh, last = is_fresh("collect_kb")
+            if fresh and last:
+                jst = last.astimezone(JST_TZ) if last.tzinfo else last
+                say_fn(
+                    text=f"✅ {jst.strftime('%H:%M')} に収集済みのため KB は最新です"
+                         f"（{FRESHNESS_MINUTES}分以内の再収集はスキップされます）。\n"
+                         f"強制的に再収集する場合は期間を指定してください（例: `情報収集 7/1-7/8`）。",
+                    **kwargs,
+                )
+                return
 
         since, until = _parse_range(raw_text)
         say_fn(
@@ -394,7 +575,7 @@ class SlackBot:
         def _worker():
             self._job_running = True
             try:
-                from src.manual_jobs import collect_kb
+                from src.manual_jobs import collect_kb, mark_success
                 result = collect_kb(self._config, since, until)
                 lines = [
                     "✅ 情報収集が完了しました",
@@ -406,10 +587,14 @@ class SlackBot:
                 if result["errors"]:
                     lines.append("⚠️ 一部エラー:")
                     lines += [f"　・{e}" for e in result["errors"]]
-                say_fn(text="\n".join(lines), **kwargs)
+                message = "\n".join(lines)
+                mark_success("collect_kb", detail=f"backlog={result['backlog']}, meeting={result['meeting']}")
+                say_fn(text=message, **kwargs)
+                self._notify_waiters(message)
             except Exception as e:
                 logger.error(f"情報収集失敗: {e}")
                 say_fn(text=f"⚠️ 情報収集に失敗しました: {e}", **kwargs)
+                self._notify_waiters(f"⚠️ 実行中だった情報収集は失敗しました: {e}")
             finally:
                 self._job_running = False
 
@@ -572,6 +757,19 @@ class SlackBot:
         # Backlog 転記コマンド（プレビュー → ボタン確認）
         if any(text.lower().startswith(p.lower()) for p in _POST_PREFIXES):
             self._handle_post_preview(text, say_fn, kwargs)
+            return None, None
+
+        # 私のID（メンバー登録用の Slack ID 確認）
+        if text.lower() in _MYID_PREFIXES:
+            ch_name = self._channel_name(channel)
+            ch_note = f" / このチャンネル: {channel}（#{ch_name}）" if ch_name else ""
+            say_fn(text=f"🦜 あなたの Slack ID: `{user}`{ch_note}", **kwargs)
+            return None, None
+
+        # 設定コマンド（wasabi_teams の簡易設定）
+        if any(text.lower().startswith(p.lower()) for p in _SETTINGS_PREFIXES):
+            reply = self._handle_settings(text, user, channel, self._channel_name(channel))
+            say_fn(text=reply, **kwargs)
             return None, None
 
         # 共有事項コマンド

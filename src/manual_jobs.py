@@ -98,6 +98,60 @@ def collect_meeting_docs(config: dict, since: datetime, until: datetime) -> dict
 
 
 # --------------------------------------------------------------------------- #
+#  ジョブ実行記録（鮮度チェック用）
+# --------------------------------------------------------------------------- #
+
+# この時間以内に完了済みなら再収集をスキップする（分）
+FRESHNESS_MINUTES = 30
+
+_JOB_STATUS_COLLECTION = "wasabi_job_status"
+
+
+def get_last_success(job: str) -> datetime | None:
+    """ジョブの最終成功時刻を返す（記録がなければ None）"""
+    from src import smartsync_client as sc
+    from datetime import timezone
+    try:
+        url = sc._doc_url(_JOB_STATUS_COLLECTION, job)
+        resp = sc._get_session().get(url, timeout=15)
+        if resp.status_code != 200:
+            return None
+        data = sc._parse_doc(resp.json()) or {}
+        ts = data.get("completed_at")
+        if isinstance(ts, str):
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return ts if isinstance(ts, datetime) else None
+    except Exception as e:
+        logger.warning(f"job_status 取得失敗（{job}）: {e}")
+        return None
+
+
+def mark_success(job: str, detail: str = "") -> None:
+    """ジョブの成功を記録する"""
+    from src import smartsync_client as sc
+    from datetime import timezone
+    try:
+        sc.save_doc(_JOB_STATUS_COLLECTION, job, {
+            "completed_at": datetime.now(timezone.utc),
+            "detail": detail,
+        })
+    except Exception as e:
+        logger.warning(f"job_status 記録失敗（{job}）: {e}")
+
+
+def is_fresh(job: str, minutes: int = FRESHNESS_MINUTES) -> tuple[bool, datetime | None]:
+    """直近 minutes 分以内に成功済みかを返す"""
+    from datetime import timezone, timedelta
+    last = get_last_success(job)
+    if not last:
+        return False, None
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    fresh = datetime.now(timezone.utc) - last < timedelta(minutes=minutes)
+    return fresh, last
+
+
+# --------------------------------------------------------------------------- #
 #  全 KB 収集（Backlog + Slack + 議事録）
 # --------------------------------------------------------------------------- #
 
