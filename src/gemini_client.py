@@ -169,7 +169,7 @@ _DAILY_SUMMARY_PROMPT = """\
 _RAG_PROMPT = """\
 あなたは社内業務の知識アシスタントです。
 以下の「参照ドキュメント」に記載されている情報のみを使って質問に回答してください。
-
+{history_section}
 ## 参照ドキュメント
 {context}
 
@@ -178,9 +178,10 @@ _RAG_PROMPT = """\
 
 ## 回答ルール
 - 参照ドキュメントに記載されている情報のみを使って回答する
+- 会話履歴がある場合、質問中の指示語（「それ」「その件」等）は履歴の文脈で解釈する
 - 参照ドキュメントに情報がない場合は「KBに該当情報がありません」とのみ答える
 - 回答は日本語で簡潔に（300字以内）
-- 末尾に情報源（ドキュメントID）を箇条書きで記載する
+- 情報源・ドキュメントIDは記載しない（システムが回答の後に自動で付与する）
 """
 
 # Gemini が議事録を生成できなかった場合のフレーズ（フィルタリング用）
@@ -343,9 +344,11 @@ class GeminiClient:
             logger.warning(f"Gemini 矛盾チェック失敗: {e}")
             return "矛盾なし"
 
-    def answer_with_context(self, query: str, context_docs: list[dict]) -> str:
-        """RAG: ChromaDB 検索結果を文脈として質問に回答する。
+    def answer_with_context(self, query: str, context_docs: list[dict],
+                             history: str = "") -> str:
+        """RAG: KB 検索結果を文脈として質問に回答する。
         context_docs: VectorStore.search() の戻り値リスト
+        history: スレッド内の直前のやり取り（あれば指示語の解釈に使用）
         """
         if not self.enabled or not context_docs:
             return ""
@@ -354,8 +357,12 @@ class GeminiClient:
             for doc in context_docs
         ]
         context = "\n\n---\n\n".join(context_parts)
+        history_section = (
+            f"\n## 会話履歴（このスレッドの直前のやり取り）\n{history}\n" if history else ""
+        )
         try:
-            prompt = _RAG_PROMPT.format(context=context, query=query)
+            prompt = _RAG_PROMPT.format(
+                context=context, query=query, history_section=history_section)
             return self._call(prompt)
         except Exception as e:
             logger.warning(f"Gemini RAG回答生成失敗: {e}")

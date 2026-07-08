@@ -708,21 +708,84 @@ class SlackBot:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _search_and_answer(self, query: str) -> str:
-        """クエリを KB 検索 → Gemini で回答生成"""
+    def _format_sources(self, results: list[dict]) -> str:
+        """検索結果から出典ブロック（リンク付き）を組み立てる"""
+        base_url = (self._config.get("backlog", {}) or {}).get(
+            "base_url", "https://adastria.backlog.jp").rstrip("/")
+        lines = []
+        seen: set[str] = set()
+        for r in results:
+            doc_id = r.get("doc_id", "")
+            if not doc_id or doc_id in seen:
+                continue
+            seen.add(doc_id)
+            meta = r.get("meta", {}) or {}
+            st = meta.get("source_type", "")
+            key = meta.get("source_key", "")
+            name = meta.get("source_name", "")
+            if st == "backlog" and key:
+                # Backlog 課題への直接リンク
+                lines.append(f"・<{base_url}/view/{key}|{key}>　{name}")
+            elif st == "slack" and key:
+                # Slack はチャンネルメンション形式（クリックでチャンネルへ）
+                lines.append(f"・<#{key}> の週次まとめ")
+            elif st == "meeting":
+                lines.append(f"・議事録: {name}")
+            else:
+                lines.append(f"・{name or doc_id}")
+        if not lines:
+            return ""
+        return "\n\n📚 *情報源*\n" + "\n".join(lines)
+
+    def _fetch_thread_history(self, channel: str, thread_ts: str,
+                                current_ts: str = "", limit: int = 8) -> str:
+        """スレッド内の直前のやり取りをテキスト化して返す（文脈継続用）"""
+        if not thread_ts:
+            return ""
+        try:
+            from slack_sdk import WebClient
+            resp = WebClient(token=self._bot_token).conversations_replies(
+                channel=channel, ts=thread_ts, limit=limit + 2)
+            lines = []
+            for msg in resp.get("messages", []):
+                if msg.get("ts") == current_ts:
+                    continue  # いま処理中の質問自体は除外
+                text = re.sub(r"<@[^>]+>", "", msg.get("text") or "").strip()
+                if not text:
+                    continue
+                speaker = "Bot" if (msg.get("bot_id") or msg.get("user") == self._bot_user_id) else "ユーザー"
+                # 出典ブロックは履歴に不要なので除去
+                text = text.split("📚")[0].strip()
+                lines.append(f"{speaker}: {text[:300]}")
+            return "\n".join(lines[-limit:])
+        except Exception as e:
+            logger.warning(f"スレッド履歴取得失敗: {e}")
+            return ""
+
+    def _search_and_answer(self, query: str, history: str = "") -> str:
+        """クエリを KB 検索 → Gemini で回答生成（出典リンク付き・スレッド文脈対応）"""
         if self.vs.count() == 0:
             return (
                 "KB にデータがありません。\n"
                 "`python main.py --only kb` を実行してインデックスを構築してください。"
             )
-        results = self.vs.search(query, n_results=self.n_results)
+        # 指示語を含む短い質問は、履歴と結合して検索クエリを補強する
+        search_query = f"{history}\n{query}" if (history and len(query) <= 30) else query
+        results = self.vs.search(search_query, n_results=self.n_results)
         if not results:
             return "KB に該当情報が見つかりませんでした。"
-        answer = self.gemini.answer_with_context(query, results)
-        return answer or "回答の生成に失敗しました。"
+        answer = self.gemini.answer_with_context(query, results, history=history)
+        if not answer:
+            return "回答の生成に失敗しました。"
+        # 「該当情報なし」の場合は出典を付けない
+        if "該当情報がありません" in answer:
+            return answer
+        return answer + self._format_sources(results)
 
-    def _dispatch(self, text: str, user: str, channel: str, say_fn, thread_ts: str = None):
-        """コマンド判定と処理の共通ロジック。thread_ts=None は DM。"""
+    def _dispatch(self, text: str, user: str, channel: str, say_fn,
+                   thread_ts: str = None, history: str = ""):
+        """コマンド判定と処理の共通ロジック。thread_ts=None は DM。
+        history: スレッド内の直前のやり取り（RAG の文脈継続に使用）"""
         kwargs = {"thread_ts": thread_ts} if thread_ts else {}
 
         # 削除コマンド
@@ -786,7 +849,7 @@ class SlackBot:
 
         # KB 質問（RAG）
         logger.info(f"Slack Bot 質問受信: {text}")
-        answer = self._search_and_answer(text)
+        answer = self._search_and_answer(text, history=history)
         resp = say_fn(text=answer, **kwargs)
         if resp and resp.get("ts"):
             store_key = thread_ts if thread_ts else channel
@@ -819,7 +882,14 @@ class SlackBot:
             user = event.get("user", "")
             channel = event["channel"]
 
-            cmd, bot_ts = self._dispatch(text, user, channel, say, thread_ts=event.get("ts"))
+            # スレッド内のメンションなら直前のやり取りを文脈として取得
+            history = ""
+            if event.get("thread_ts"):
+                history = self._fetch_thread_history(
+                    channel, event["thread_ts"], current_ts=event.get("ts", ""))
+
+            cmd, bot_ts = self._dispatch(text, user, channel, say,
+                                          thread_ts=event.get("ts"), history=history)
             if cmd == "_delete_":
                 # thread_ts がある場合はスレッドの根 ts がキー
                 key = event.get("thread_ts")
@@ -847,7 +917,14 @@ class SlackBot:
             user = event.get("user", "")
             channel = event["channel"]
 
-            cmd, bot_ts = self._dispatch(text, user, channel, say, thread_ts=None)
+            # DM のスレッド返信なら文脈を取得
+            history = ""
+            if event.get("thread_ts"):
+                history = self._fetch_thread_history(
+                    channel, event["thread_ts"], current_ts=event.get("ts", ""))
+
+            cmd, bot_ts = self._dispatch(text, user, channel, say,
+                                          thread_ts=None, history=history)
             if cmd == "_delete_":
                 try:
                     client.chat_delete(channel=channel, ts=bot_ts)

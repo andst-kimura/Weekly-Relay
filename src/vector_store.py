@@ -6,9 +6,13 @@ findNearest クエリで意味検索を行う。
 """
 import logging
 import os
+import re
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+# 課題キーのパターン（ハイブリッド検索の直接ヒット用）
+_ISSUE_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
 
 
 def _build_embed_text(doc_id: str, data: dict) -> str:
@@ -80,33 +84,71 @@ class VectorStore:
         except Exception as e:
             logger.warning(f"VectorStore upsert 失敗 ({doc_id}): {e}")
 
+    @staticmethod
+    def _to_result(doc_id: str, data: dict, score: float) -> dict:
+        """検索結果1件の共通フォーマットを組み立てる"""
+        text = _build_embed_text(doc_id, data)
+        meta = {
+            "source_type": data.get("source_type", ""),
+            "doc_id": doc_id,
+        }
+        for key in ("source_key", "source_name", "project_id",
+                    "issue_key", "channel_name", "week_label", "display_name"):
+            val = data.get(key)
+            if val:
+                meta[key] = str(val)
+        return {"doc_id": doc_id, "score": score, "text": text[:3000], "meta": meta}
+
+    def _keyword_hits(self, query: str) -> list[dict]:
+        """クエリ中の課題キーに対応する KB ドキュメントを直接取得する（ハイブリッド検索）。
+
+        ベクトル検索は固有 ID の一致を保証しないため、
+        課題キーが明示された質問では該当ドキュメントを必ず結果に含める。
+        """
+        issue_keys = _ISSUE_KEY_RE.findall(query)[:3]  # 1クエリ最大3キー
+        if not issue_keys:
+            return []
+        # 登録チームの project_id で doc_id を組み立てて直接 GET
+        try:
+            from src.team_config import list_teams
+            team_ids = [t["team_id"] for t in list_teams()] or ["sales"]
+        except Exception:
+            team_ids = ["sales"]
+        hits = []
+        for key in issue_keys:
+            for tid in team_ids:
+                doc_id = f"wasabi_{tid}_backlog_{key}"
+                try:
+                    data = self._sc.get_context_snapshot(doc_id)
+                except Exception:
+                    data = None
+                if data:
+                    hits.append(self._to_result(doc_id, data, score=1.0))
+                    break  # 同一キーは最初に見つかったチームのもののみ
+        if hits:
+            logger.info(f"ハイブリッド検索: 課題キー直接ヒット {[h['doc_id'] for h in hits]}")
+        return hits
+
     def search(self, query: str, n_results: int = 5) -> list[dict]:
-        """クエリに意味的に近い KB ドキュメントを返す。
+        """クエリに意味的に近い KB ドキュメントを返す（課題キーは直接取得を併用）。
         戻り値: [{"doc_id": str, "score": float, "text": str, "meta": dict}, ...]
         """
         try:
+            # ① キーワード（課題キー）直接ヒット
+            keyword_hits = self._keyword_hits(query)
+            seen = {h["doc_id"] for h in keyword_hits}
+
+            # ② ベクトル検索
             embedding = self._embed(query)
             raw = self._sc.vector_search(embedding, n_results)
-            output = []
-            for item in raw:
-                data = item.get("data", {})
-                text = _build_embed_text(item["doc_id"], data)
-                meta = {
-                    "source_type": data.get("source_type", ""),
-                    "doc_id": item["doc_id"],
-                }
-                for key in ("source_key", "source_name", "project_id",
-                            "issue_key", "channel_name", "week_label", "display_name"):
-                    val = data.get(key)
-                    if val:
-                        meta[key] = str(val)
-                output.append({
-                    "doc_id": item["doc_id"],
-                    "score": item["score"],
-                    "text": text[:3000],
-                    "meta": meta,
-                })
-            return output
+            vector_hits = [
+                self._to_result(item["doc_id"], item.get("data", {}), item["score"])
+                for item in raw
+                if item["doc_id"] not in seen
+            ]
+
+            # 直接ヒットを先頭に、全体で n_results + キーワード分まで
+            return (keyword_hits + vector_hits)[: n_results + len(keyword_hits)]
         except Exception as e:
             logger.warning(f"VectorStore search 失敗: {e}")
             return []
