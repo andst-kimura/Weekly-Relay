@@ -15,12 +15,22 @@ Socket Mode で動作するため、パブリック URL 不要。
 """
 import logging
 import re
+import threading
+import uuid
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 _DELETE_COMMANDS = {"delete", "削除", "del", "消して", "消去"}
 _MEMO_PREFIXES = ("メモ", "memo", "進捗メモ", "手動メモ", "進捗入力")
 _SHARED_INFO_PREFIXES = ("共有事項", "共有", "shared")
+_COLLECT_PREFIXES = ("議事録収集", "議事録取得", "minutes")
+_KB_COLLECT_PREFIXES = ("情報収集", "kb収集", "全収集", "collect")
+_POST_PREFIXES = ("backlog転記", "転記", "post")
+# 期間指定パターン（例: 7/1-7/7, 07/01〜07/07）
+_RANGE_RE = re.compile(
+    r"(?P<m1>\d{1,2})/(?P<d1>\d{1,2})\s*[-〜~]\s*(?P<m2>\d{1,2})/(?P<d2>\d{1,2})"
+)
 # 課題キーのパターン（例: SALES_TEAM-23, MOBILEPOS-45）
 _ISSUE_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
 # 日付パターン（期限抽出用）: YYYY/MM/DD, YYYY-MM-DD, MM/DD, M/D
@@ -42,6 +52,18 @@ _HELP_TEXT = """\
 　`@Wasabi Bot 共有事項 ACE刷新の日程変更について: 6/30→7/7に延期が決定しました`
 　`@Wasabi Bot 共有事項: タイトルを省略した場合は本文冒頭が件名になります`
 
+*情報収集（Backlog + Slack + 議事録をまとめて KB 保存）*
+　`@Wasabi Bot 情報収集`（直近7日分）
+　`@Wasabi Bot 情報収集 7/1-7/7`（期間指定）
+
+*議事録収集（議事録のみ収集 → KB 保存）*
+　`@Wasabi Bot 議事録収集`（直近7日分）
+　`@Wasabi Bot 議事録収集 7/1-7/7`（期間指定）
+
+*Backlog 転記（週次レポートを Backlog へ手動転記）*
+　`@Wasabi Bot 転記`（今週分。プレビュー確認後にボタンで実行）
+　`@Wasabi Bot 転記 7/1-7/4`（期間指定）
+
 *Bot 返信の削除（チャンネル）*
 　返信スレッド内で `@Wasabi Bot delete` と送信
 
@@ -50,6 +72,68 @@ _HELP_TEXT = """\
 
 KB が空の場合は `python main.py --only kb` を実行してインデックスを更新してください。
 """
+
+
+def _parse_range(text: str, default_days: int = 7) -> tuple[datetime, datetime]:
+    """テキストから 'M/D-M/D' 形式の期間を抽出する。なければ直近 default_days 日。"""
+    now = datetime.now()
+    m = _RANGE_RE.search(text)
+    if m:
+        year = now.year
+        since = datetime(year, int(m.group("m1")), int(m.group("d1")), 0, 0, 0)
+        until = datetime(year, int(m.group("m2")), int(m.group("d2")), 23, 59, 59)
+        # 年またぎ（12月指定を1月に実行等）は前年とみなす
+        if since > now:
+            since = since.replace(year=year - 1)
+            until = until.replace(year=year - 1)
+        return since, until
+    return now - timedelta(days=default_days), now
+
+
+def _build_home_blocks() -> list[dict]:
+    """App Home タブに表示する機能一覧（Block Kit）"""
+    def section(md):
+        return {"type": "section", "text": {"type": "mrkdwn", "text": md}}
+
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "🦜 Wasabi Bot"}},
+        section(
+            "販売チームの業務 AI アシスタントです。\n"
+            "Backlog・Slack・Google Meet 議事録を毎週自動収集してナレッジベース（KB）を構築し、"
+            "質問応答・週次レポートの Backlog 転記を行います。"
+        ),
+        {"type": "divider"},
+        {"type": "header", "text": {"type": "plain_text", "text": "💬 KB 質問（いつでも）"}},
+        section(
+            "チャンネルでメンション、または DM で質問すると KB を検索して AI が回答します。\n"
+            "```@Wasabi Bot ACE刷新の進捗は？```"
+        ),
+        {"type": "divider"},
+        {"type": "header", "text": {"type": "plain_text", "text": "📝 進捗メモ・共有事項"}},
+        section(
+            "*進捗メモ*（週次レポートの情報源に追加）\n"
+            "```メモ SALES_TEAM-23: ポスタスのエラーは解消済み```\n"
+            "*共有事項*（Backlog に課題を起票）\n"
+            "```共有事項 日程変更について: 6/30→7/7に延期```"
+        ),
+        {"type": "divider"},
+        {"type": "header", "text": {"type": "plain_text", "text": "🔧 手動実行コマンド"}},
+        section(
+            "*情報収集*（Backlog + Slack + 議事録をまとめて KB 保存）\n"
+            "```情報収集           … 直近7日分\n情報収集 7/1-7/7   … 期間指定```\n"
+            "*議事録収集*（議事録のみ収集 → KB 保存）\n"
+            "```議事録収集          … 直近7日分\n議事録収集 7/1-7/7  … 期間指定```\n"
+            "*Backlog 転記*（プレビュー確認 → ボタンで実行）\n"
+            "```転記               … 今週分\n転記 7/1-7/4       … 期間指定```"
+        ),
+        {"type": "divider"},
+        section(
+            "*その他*\n"
+            "・`ヘルプ` … コマンド一覧を表示\n"
+            "・返信スレッドで `delete` … Bot の返信を削除\n"
+            "・毎週金曜 18:00 に週次レポートが自動実行されます"
+        ),
+    ]
 
 
 def _extract_due_date(text: str) -> str | None:
@@ -73,7 +157,8 @@ class SlackBot:
 
     def __init__(self, bot_token: str, app_token: str, vector_store, gemini_client,
                  n_results: int = 5, firestore_client=None, backlog_client=None,
-                 shared_info_cfg: dict = None, slack_user_to_backlog: dict = None):
+                 shared_info_cfg: dict = None, slack_user_to_backlog: dict = None,
+                 config: dict = None):
         self._bot_token = bot_token
         self._app_token = app_token
         self.vs = vector_store
@@ -91,6 +176,11 @@ class SlackBot:
         self._reply_ts: dict[str, str] = {}
         # Backlog project_id キャッシュ
         self._project_id_cache: dict[str, int] = {}
+        # 手動実行ジョブ用（議事録収集・転記）
+        self._config = config or {}
+        self._job_running = False
+        # 転記プレビュー保持: pending_id → prepared dict
+        self._pending_posts: dict[str, dict] = {}
 
     def _get_backlog_project_id(self, project_key: str) -> int | None:
         """プロジェクトキーから project_id を取得（キャッシュ付き）"""
@@ -238,6 +328,201 @@ class SlackBot:
             logger.warning(f"手動メモ: Firestore 未設定のため保存スキップ（{text}）")
             return "⚠️ Firestore が設定されていないため保存できませんでした。"
 
+    # ------------------------------------------------------------------ #
+    #  手動実行: 議事録収集
+    # ------------------------------------------------------------------ #
+
+    def _handle_collect_minutes(self, raw_text: str, say_fn, kwargs: dict) -> None:
+        """議事録収集をバックグラウンドで実行し、完了時にスレッドへ返信する"""
+        if not self._config:
+            say_fn(text="⚠️ Bot に config が渡されていないため実行できません。", **kwargs)
+            return
+        if self._job_running:
+            say_fn(text="⏳ 別のジョブが実行中です。完了までお待ちください。", **kwargs)
+            return
+
+        since, until = _parse_range(raw_text)
+        say_fn(
+            text=f"🔄 議事録を収集中...（{since.strftime('%m/%d')}〜{until.strftime('%m/%d')}）\n"
+                 f"完了したらこのスレッドに結果を返信します。",
+            **kwargs,
+        )
+
+        def _worker():
+            self._job_running = True
+            try:
+                from src.manual_jobs import collect_meeting_docs
+                result = collect_meeting_docs(self._config, since, until)
+                lines = [f"✅ 議事録 {result['count']} 件を KB に保存しました"]
+                lines += [f"　・{t}" for t in result["titles"][:15]]
+                if len(result["titles"]) > 15:
+                    lines.append(f"　…ほか {len(result['titles']) - 15} 件")
+                if result["errors"]:
+                    lines.append("⚠️ 一部エラー:")
+                    lines += [f"　・{e}" for e in result["errors"]]
+                if result["count"] == 0 and not result["errors"]:
+                    lines = [f"議事録は見つかりませんでした（{since.strftime('%m/%d')}〜{until.strftime('%m/%d')}）"]
+                say_fn(text="\n".join(lines), **kwargs)
+            except Exception as e:
+                logger.error(f"議事録収集失敗: {e}")
+                say_fn(text=f"⚠️ 議事録収集に失敗しました: {e}", **kwargs)
+            finally:
+                self._job_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ------------------------------------------------------------------ #
+    #  手動実行: 全 KB 収集（Backlog + Slack + 議事録）
+    # ------------------------------------------------------------------ #
+
+    def _handle_collect_kb(self, raw_text: str, say_fn, kwargs: dict) -> None:
+        """Backlog・Slack・議事録の全収集をバックグラウンドで実行する"""
+        if not self._config:
+            say_fn(text="⚠️ Bot に config が渡されていないため実行できません。", **kwargs)
+            return
+        if self._job_running:
+            say_fn(text="⏳ 別のジョブが実行中です。完了までお待ちください。", **kwargs)
+            return
+
+        since, until = _parse_range(raw_text)
+        say_fn(
+            text=f"🔄 情報収集を開始しました（{since.strftime('%m/%d')}〜{until.strftime('%m/%d')}）\n"
+                 f"Backlog・Slack・議事録を収集して KB に保存します。数分かかる場合があります。",
+            **kwargs,
+        )
+
+        def _worker():
+            self._job_running = True
+            try:
+                from src.manual_jobs import collect_kb
+                result = collect_kb(self._config, since, until)
+                lines = [
+                    "✅ 情報収集が完了しました",
+                    f"・Backlog 活動: {result['backlog']} 件（メンバー {result['members']} 名分含む）",
+                    f"・議事録: {result['meeting']} 件",
+                    "・Slack: 参加チャンネルを収集済み",
+                    "収集した情報は KB に保存され、質問応答で利用できます。",
+                ]
+                if result["errors"]:
+                    lines.append("⚠️ 一部エラー:")
+                    lines += [f"　・{e}" for e in result["errors"]]
+                say_fn(text="\n".join(lines), **kwargs)
+            except Exception as e:
+                logger.error(f"情報収集失敗: {e}")
+                say_fn(text=f"⚠️ 情報収集に失敗しました: {e}", **kwargs)
+            finally:
+                self._job_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ------------------------------------------------------------------ #
+    #  手動実行: Backlog 転記（プレビュー → ボタン確認）
+    # ------------------------------------------------------------------ #
+
+    def _handle_post_preview(self, raw_text: str, say_fn, kwargs: dict) -> None:
+        """転記プレビューを生成し、確認ボタン付きで返信する"""
+        if not self._config:
+            say_fn(text="⚠️ Bot に config が渡されていないため実行できません。", **kwargs)
+            return
+        if self._job_running:
+            say_fn(text="⏳ 別のジョブが実行中です。完了までお待ちください。", **kwargs)
+            return
+
+        # 期間: 指定なしなら今週（月曜0:00〜今日）
+        m = _RANGE_RE.search(raw_text)
+        if m:
+            since, until = _parse_range(raw_text)
+        else:
+            now = datetime.now()
+            monday = now - timedelta(days=now.weekday())
+            since = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+            until = now
+
+        say_fn(
+            text=f"🔄 転記プレビューを作成中...（{since.strftime('%m/%d')}〜{until.strftime('%m/%d')}）",
+            **kwargs,
+        )
+
+        def _worker():
+            self._job_running = True
+            try:
+                from src.manual_jobs import prepare_backlog_post
+                prepared = prepare_backlog_post(self._config, since, until)
+                pending_id = uuid.uuid4().hex[:12]
+                self._pending_posts[pending_id] = prepared
+
+                dry_run = self._config.get("report", {}).get("dry_run", False)
+                dry_note = "（dry_run 有効: 実際には書き込みません）" if dry_run else ""
+                targets_text = "\n".join(f"　・{t}" for t in prepared["targets"][:10]) or "　（明示指定なし・自動判別）"
+                preview_text = (
+                    f"📋 *転記プレビュー*（{since.strftime('%m/%d')}〜{until.strftime('%m/%d')}）{dry_note}\n"
+                    f"・Backlog 活動: {prepared['backlog_count']} 件\n"
+                    f"・Slack メッセージ: {prepared['slack_count']} 件\n"
+                    f"・議事録: {prepared['meeting_count']} 件\n"
+                    f"・手動メモ: {prepared['memo_count']} 件\n"
+                    f"*明示転記先（channel_mapping）*\n{targets_text}"
+                )
+                blocks = [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": preview_text}},
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "転記を実行"},
+                                "style": "primary",
+                                "action_id": "wasabi_post_confirm",
+                                "value": pending_id,
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "キャンセル"},
+                                "action_id": "wasabi_post_cancel",
+                                "value": pending_id,
+                            },
+                        ],
+                    },
+                ]
+                say_fn(text="転記プレビュー", blocks=blocks, **kwargs)
+            except Exception as e:
+                logger.error(f"転記プレビュー作成失敗: {e}")
+                say_fn(text=f"⚠️ プレビュー作成に失敗しました: {e}", **kwargs)
+            finally:
+                self._job_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _execute_post(self, pending_id: str, say_fn) -> None:
+        """確認ボタン押下後の転記実行（バックグラウンド）"""
+        prepared = self._pending_posts.pop(pending_id, None)
+        if not prepared:
+            say_fn(text="⚠️ このプレビューは期限切れです。もう一度 `転記` コマンドを実行してください。")
+            return
+        if self._job_running:
+            say_fn(text="⏳ 別のジョブが実行中です。完了までお待ちください。")
+            return
+
+        say_fn(text="🔄 Backlog へ転記中...")
+
+        def _worker():
+            self._job_running = True
+            try:
+                from src.manual_jobs import execute_backlog_post
+                results = execute_backlog_post(self._config, prepared)
+                lines = [f"✅ Backlog 転記が完了しました（{len(results)} 件）"]
+                for r in results[:10]:
+                    lines.append(f"　・{r}")
+                if len(results) > 10:
+                    lines.append(f"　…ほか {len(results) - 10} 件")
+                say_fn(text="\n".join(lines))
+            except Exception as e:
+                logger.error(f"Backlog 転記失敗: {e}")
+                say_fn(text=f"⚠️ 転記に失敗しました: {e}")
+            finally:
+                self._job_running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _search_and_answer(self, query: str) -> str:
         """クエリを KB 検索 → Gemini で回答生成"""
         if self.vs.count() == 0:
@@ -272,6 +557,21 @@ class SlackBot:
         # ヘルプ
         if not text or text in ("help", "ヘルプ", "?", "？"):
             say_fn(text=_HELP_TEXT, **kwargs)
+            return None, None
+
+        # 議事録収集コマンド
+        if any(text.lower().startswith(p.lower()) for p in _COLLECT_PREFIXES):
+            self._handle_collect_minutes(text, say_fn, kwargs)
+            return None, None
+
+        # 全 KB 収集コマンド（Backlog + Slack + 議事録）
+        if any(text.lower().startswith(p.lower()) for p in _KB_COLLECT_PREFIXES):
+            self._handle_collect_kb(text, say_fn, kwargs)
+            return None, None
+
+        # Backlog 転記コマンド（プレビュー → ボタン確認）
+        if any(text.lower().startswith(p.lower()) for p in _POST_PREFIXES):
+            self._handle_post_preview(text, say_fn, kwargs)
             return None, None
 
         # 共有事項コマンド
@@ -357,6 +657,54 @@ class SlackBot:
                 except Exception as e:
                     logger.warning(f"chat_delete 失敗: {e}")
                     say(f"削除に失敗しました: {e}")
+
+        @app.action("wasabi_post_confirm")
+        def handle_post_confirm(ack, body, client, say):
+            ack()
+            pending_id = body["actions"][0]["value"]
+            channel = body["channel"]["id"]
+            msg = body.get("message", {}) or {}
+            thread_ts = msg.get("thread_ts")
+
+            # ボタンを消して二度押しを防ぐ
+            try:
+                client.chat_update(
+                    channel=channel, ts=msg.get("ts"),
+                    text="転記を実行します...", blocks=[])
+            except Exception:
+                pass
+
+            def _say(text, **kw):
+                params = {"channel": channel, "text": text}
+                if thread_ts:
+                    params["thread_ts"] = thread_ts
+                return client.chat_postMessage(**params)
+
+            self._execute_post(pending_id, _say)
+
+        @app.action("wasabi_post_cancel")
+        def handle_post_cancel(ack, body, client):
+            ack()
+            pending_id = body["actions"][0]["value"]
+            self._pending_posts.pop(pending_id, None)
+            channel = body["channel"]["id"]
+            msg = body.get("message", {}) or {}
+            try:
+                client.chat_update(
+                    channel=channel, ts=msg.get("ts"),
+                    text="❌ 転記をキャンセルしました。", blocks=[])
+            except Exception:
+                client.chat_postMessage(channel=channel, text="❌ 転記をキャンセルしました。")
+
+        @app.event("app_home_opened")
+        def handle_app_home(event, client):
+            try:
+                client.views_publish(
+                    user_id=event["user"],
+                    view={"type": "home", "blocks": _build_home_blocks()},
+                )
+            except Exception as e:
+                logger.warning(f"App Home 表示失敗: {e}")
 
         logger.info("Slack Bot 起動中... (Socket Mode)")
         logger.info("チャンネル内でメンション、またはDMで質問できます。Ctrl+C で停止。")

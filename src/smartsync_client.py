@@ -29,17 +29,27 @@ def _database() -> str:
 
 @lru_cache(maxsize=1)
 def _get_session() -> google.auth.transport.requests.AuthorizedSession:
+    scopes = ["https://www.googleapis.com/auth/datastore"]
     sa_key = os.environ.get(
         "SMARTSYNC_GOOGLE_APPLICATION_CREDENTIALS",
         r"config/andst-hd-ax-276f47e40899.json",
     )
-    creds = google.oauth2.service_account.Credentials.from_service_account_file(
-        sa_key,
-        scopes=["https://www.googleapis.com/auth/datastore"],
-    )
-    session = google.auth.transport.requests.AuthorizedSession(creds)
-    session.verify = False
-    return session
+    # 相対パスはリポジトリルート基準で解決（webapp 等 cwd が異なる場合に対応）
+    if not os.path.isabs(sa_key) and not os.path.exists(sa_key):
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidate = os.path.join(_root, sa_key)
+        if os.path.exists(candidate):
+            sa_key = candidate
+    if os.path.exists(sa_key):
+        # ローカル PC: サービスアカウントキー（社内プロキシ対応で verify=False）
+        creds = google.oauth2.service_account.Credentials.from_service_account_file(
+            sa_key, scopes=scopes)
+        session = google.auth.transport.requests.AuthorizedSession(creds)
+        session.verify = False
+        return session
+    # Cloud Run 等: ADC（Application Default Credentials）
+    creds, _ = google.auth.default(scopes=scopes)
+    return google.auth.transport.requests.AuthorizedSession(creds)
 
 
 def _col_url(collection: str) -> str:

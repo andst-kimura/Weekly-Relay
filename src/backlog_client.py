@@ -2,9 +2,11 @@
 Backlog API クライアント
 自分が関わった課題・コメント・操作履歴を取得する
 """
+import re
 import requests
 from requests.adapters import HTTPAdapter
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
@@ -13,7 +15,29 @@ import logging
 logger = logging.getLogger(__name__)
 
 _RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
-_MAX_RETRIES = 3
+_MAX_RETRIES = 5
+
+# Backlog のレート制限（読み取り 150 リクエスト/分）を超えないよう、
+# 全スレッド共通でリクエスト間隔を空けるスロットラー
+_MIN_REQUEST_INTERVAL = 0.45  # 秒（約 130 リクエスト/分に抑制）
+_throttle_lock = threading.Lock()
+_last_request_at = 0.0
+
+
+def _sanitize(text) -> str:
+    """ログ・例外メッセージから API キーをマスクする"""
+    return re.sub(r"apiKey=[^&\s'\"]+", "apiKey=***", str(text))
+
+
+def _throttle():
+    """全スレッド共通のリクエスト間隔制御"""
+    global _last_request_at
+    with _throttle_lock:
+        now = time.monotonic()
+        wait = _last_request_at + _MIN_REQUEST_INTERVAL - now
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.monotonic()
 
 
 class BacklogClient:
@@ -30,15 +54,32 @@ class BacklogClient:
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
         """レートリミット・一時エラー時にリトライするリクエスト共通処理"""
         for attempt in range(_MAX_RETRIES):
+            _throttle()
             response = self.session.request(method, url, **kwargs)
             if response.status_code not in _RETRY_STATUS_CODES:
-                response.raise_for_status()
+                self._raise_for_status_sanitized(response)
                 return response
-            wait = int(response.headers.get("Retry-After", 2 ** attempt))
+            if response.status_code == 429:
+                # X-RateLimit-Reset（epoch秒）があればそこまで待つ
+                reset = response.headers.get("X-RateLimit-Reset", "")
+                if reset.isdigit():
+                    wait = max(1, int(reset) - int(time.time()) + 1)
+                else:
+                    wait = int(response.headers.get("Retry-After", min(2 ** attempt * 2, 60)))
+            else:
+                wait = int(response.headers.get("Retry-After", 2 ** attempt))
             logger.warning(f"Backlog API {response.status_code}: {wait}秒後にリトライ ({attempt + 1}/{_MAX_RETRIES})")
             time.sleep(wait)
-        response.raise_for_status()
+        self._raise_for_status_sanitized(response)
         return response
+
+    @staticmethod
+    def _raise_for_status_sanitized(response: requests.Response) -> None:
+        """raise_for_status 相当。例外メッセージの URL から API キーをマスクする"""
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            raise requests.HTTPError(_sanitize(e), response=response) from None
 
     def _get(self, endpoint: str, params: dict = None) -> dict | list:
         params = params or {}

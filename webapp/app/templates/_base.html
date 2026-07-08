@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Wasabi Admin{% endblock %}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root { --wasabi: #5a8f3c; --wasabi-dark: #3f6b28; }
+    body { background: #f6f8f5; }
+    .navbar { background: var(--wasabi-dark); }
+    .navbar-brand { color: #fff !important; font-weight: 700; }
+    .navbar-text { color: #d9e8cf; }
+    .btn-wasabi { background: var(--wasabi); color: #fff; }
+    .btn-wasabi:hover { background: var(--wasabi-dark); color: #fff; }
+    .card { border: none; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+    .badge-on  { background: var(--wasabi); }
+    .badge-off { background: #999; }
+    .table td, .table th { vertical-align: middle; }
+    .readonly-note { color: #a06000; }
+  </style>
+</head>
+<body>
+<nav class="navbar navbar-expand px-3 mb-4">
+  <a class="navbar-brand" href="/">🦜 Wasabi Admin</a>
+  <div class="ms-auto navbar-text small">
+    {{ user.email }}
+    {% if user.is_admin %}<span class="badge bg-warning text-dark ms-1">管理者</span>
+    {% else %}<span class="badge bg-secondary ms-1">閲覧のみ</span>{% endif %}
+  </div>
+</nav>
+<div class="container pb-5">
+  {% if not user.is_admin %}
+  <div class="alert alert-warning py-2 small readonly-note">
+    閲覧専用モードです。設定の変更には管理者権限（wasabi_admins への登録）が必要です。
+  </div>
+  {% endif %}
+  {% block content %}{% endblock %}
+</div>
+<script>
+  const IS_ADMIN = {{ 'true' if user.is_admin else 'false' }};
+  async function api(path, opts = {}) {
+    const resp = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      ...opts,
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.detail || `HTTP ${resp.status}`);
+    }
+    return resp.json();
+  }
+  function toast(msg, ok = true) {
+    const el = document.createElement("div");
+    el.className = `alert alert-${ok ? "success" : "danger"} position-fixed top-0 end-0 m-3 shadow`;
+    el.style.zIndex = 2000;
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

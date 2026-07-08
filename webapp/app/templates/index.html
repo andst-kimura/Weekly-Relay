@@ -1,0 +1,121 @@
+{% extends "_base.html" %}
+{% block title %}ダッシュボード | Wasabi Admin{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">チーム一覧</h4>
+  <button class="btn btn-wasabi btn-sm" onclick="showCreateModal()" id="btn-create"
+          {% if not user.is_admin %}disabled{% endif %}>＋ 新規チーム</button>
+</div>
+
+<div class="card mb-4">
+  <div class="table-responsive">
+    <table class="table mb-0" id="teams-table">
+      <thead class="table-light">
+        <tr>
+          <th>チーム</th><th>状態</th><th>転記</th><th>転記先</th>
+          <th>マッピング</th><th>メンバー</th><th>最終更新</th><th></th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="8" class="text-muted">読み込み中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<h4 class="mb-3">KB（ナレッジベース）統計</h4>
+<div class="row g-3" id="stats-cards">
+  <div class="col-12 text-muted">読み込み中...</div>
+</div>
+
+<!-- 新規チームモーダル -->
+<div class="modal fade" id="createModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">新規チーム作成</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">team_id（英小文字・数字・_）</label>
+          <input class="form-control" id="new-team-id" placeholder="logistics">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">チーム名</label>
+          <input class="form-control" id="new-team-name" placeholder="物流チーム">
+        </div>
+        <div class="small text-muted">作成直後は転記機能が無効です。詳細画面で設定後に有効化してください。</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">閉じる</button>
+        <button class="btn btn-wasabi" onclick="createTeam()">作成</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+async function loadTeams() {
+  const tbody = document.querySelector("#teams-table tbody");
+  try {
+    const data = await api("/api/teams");
+    if (!data.teams.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="text-muted">チームが登録されていません</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.teams.map(t => `
+      <tr>
+        <td><strong>${t.team_name || t.team_id}</strong><br><span class="small text-muted">${t.team_id}</span></td>
+        <td>${t.active ? '<span class="badge badge-on">稼働中</span>' : '<span class="badge badge-off">停止</span>'}</td>
+        <td>${t.transfer_enabled ? '<span class="badge badge-on">有効</span>' : '<span class="badge badge-off">無効</span>'}</td>
+        <td>${t.report_project_key || "—"}</td>
+        <td>${Object.keys(t.channel_mapping || {}).length} 件</td>
+        <td>${(t.members || []).length} 名</td>
+        <td class="small text-muted">${(t.updated_at || "").slice(0, 16).replace("T", " ")}<br>${t.updated_by || ""}</td>
+        <td><a class="btn btn-sm btn-outline-secondary" href="/teams/${t.team_id}">詳細</a></td>
+      </tr>`).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-danger">読み込み失敗: ${e.message}</td></tr>`;
+  }
+}
+
+async function loadStats() {
+  const wrap = document.getElementById("stats-cards");
+  try {
+    const s = await api("/api/stats");
+    const typeRows = Object.entries(s.by_type)
+      .map(([k, v]) => `<div class="d-flex justify-content-between"><span>${k}</span><strong>${v}</strong></div>`)
+      .join("");
+    wrap.innerHTML = `
+      <div class="col-md-3"><div class="card p-3 text-center">
+        <div class="fs-2 fw-bold">${s.total}</div><div class="text-muted small">Wasabi KB ドキュメント</div></div></div>
+      <div class="col-md-3"><div class="card p-3 text-center">
+        <div class="fs-2 fw-bold">${s.embedded}</div><div class="text-muted small">embedding 済み</div></div></div>
+      <div class="col-md-3"><div class="card p-3">
+        <div class="text-muted small mb-1">種別内訳</div>${typeRows}</div></div>
+      <div class="col-md-3"><div class="card p-3 text-center">
+        <div class="fw-bold">${s.latest_synced_at || "—"}</div><div class="text-muted small">最終同期</div></div></div>`;
+  } catch (e) {
+    wrap.innerHTML = `<div class="col-12 text-danger">統計取得失敗: ${e.message}</div>`;
+  }
+}
+
+function showCreateModal() {
+  new bootstrap.Modal(document.getElementById("createModal")).show();
+}
+
+async function createTeam() {
+  try {
+    const team_id = document.getElementById("new-team-id").value.trim();
+    const team_name = document.getElementById("new-team-name").value.trim();
+    await api("/api/teams", { method: "POST", body: JSON.stringify({ team_id, team_name }) });
+    toast("チームを作成しました");
+    location.href = `/teams/${team_id}`;
+  } catch (e) { toast(e.message, false); }
+}
+
+loadTeams();
+loadStats();
+</script>
+{% endblock %}

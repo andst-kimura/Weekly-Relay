@@ -1,0 +1,352 @@
+{% extends "_base.html" %}
+{% block title %}チーム設定 | Wasabi Admin{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0" id="page-title">チーム設定</h4>
+  <a class="btn btn-sm btn-outline-secondary" href="/">← 一覧へ</a>
+</div>
+
+<!-- 基本設定 -->
+<div class="card p-3 mb-4">
+  <h6 class="mb-3">基本設定</h6>
+  <div class="row g-3">
+    <div class="col-md-4">
+      <label class="form-label small">チーム名</label>
+      <input class="form-control" id="f-team-name">
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small">状態</label>
+      <select class="form-select" id="f-active">
+        <option value="true">稼働中</option><option value="false">停止</option>
+      </select>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small">転記機能</label>
+      <select class="form-select" id="f-transfer">
+        <option value="true">有効</option><option value="false">無効</option>
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label small">転記方式</label>
+      <select class="form-select" id="f-transfer-mode">
+        <option value="single_project">進捗管理プロジェクトへコメント転記</option>
+        <option value="per_issue_project" disabled>案件ごとのプロジェクトへ個別起票（準備中）</option>
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label small">転記先 Backlog プロジェクトキー</label>
+      <input class="form-control" id="f-project-key" placeholder="SALES_TEAM">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label small">Google Meet フォルダ ID</label>
+      <input class="form-control" id="f-meet-folder">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label small">共有事項: 起票先プロジェクト</label>
+      <input class="form-control" id="f-shared-project">
+    </div>
+    <div class="col-md-3">
+      <label class="form-label small">共有事項: 種別 ID</label>
+      <input class="form-control" id="f-shared-type">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label small">Backlog 除外プロジェクト（1行1件）</label>
+      <textarea class="form-control" id="f-exclude" rows="4"></textarea>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label small">Bot 設定コマンド許可（Slack ユーザー ID・1行1件）</label>
+      <textarea class="form-control" id="f-admin-slack" rows="4"></textarea>
+    </div>
+  </div>
+  <div class="mt-3">
+    <button class="btn btn-wasabi" onclick="saveBasic()" id="btn-save" {% if not user.is_admin %}disabled{% endif %}>基本設定を保存</button>
+    <span class="small text-muted ms-2" id="save-note"></span>
+  </div>
+</div>
+
+<!-- チャンネルマッピング -->
+<div class="card p-3 mb-4">
+  <h6 class="mb-3">チャンネルマッピング（Slack チャンネル → Backlog 転記先）</h6>
+  <div class="table-responsive">
+    <table class="table table-sm" id="mapping-table">
+      <thead class="table-light">
+        <tr><th>チャンネル名</th><th>channel_id</th><th>転記先課題</th><th>ラベル</th><th>議事録キーワード</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  {% if user.is_admin %}
+  <div class="row g-2 align-items-end border-top pt-3">
+    <div class="col-md-2"><label class="form-label small">チャンネル名</label>
+      <input class="form-control form-control-sm" id="m-channel" placeholder="販売チーム_pdc"></div>
+    <div class="col-md-2"><label class="form-label small">channel_id（任意）</label>
+      <input class="form-control form-control-sm" id="m-channel-id" placeholder="C04..."></div>
+    <div class="col-md-2"><label class="form-label small">転記先課題キー</label>
+      <input class="form-control form-control-sm" id="m-issue" placeholder="SALES_TEAM-256"
+             onblur="validateIssue()"></div>
+    <div class="col-md-3"><label class="form-label small">キーワード（カンマ区切り・任意）</label>
+      <input class="form-control form-control-sm" id="m-keywords" placeholder="サイネージ, PDC"></div>
+    <div class="col-md-2">
+      <button class="btn btn-wasabi btn-sm w-100" onclick="addMapping()">追加 / 上書き</button>
+    </div>
+    <div class="col-12"><span class="small" id="issue-check"></span></div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- メンバー -->
+<div class="card p-3 mb-4">
+  <h6 class="mb-3">メンバー</h6>
+  <div class="table-responsive">
+    <table class="table table-sm" id="members-table">
+      <thead class="table-light">
+        <tr><th>名前</th><th>Backlog user_id</th><th>Slack user_id</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  {% if user.is_admin %}
+  <div class="border-top pt-3">
+    <div class="row g-2 align-items-end mb-2">
+      <div class="col-md-4">
+        <label class="form-label small">Backlog から名前で検索（数値 ID を自動入力）</label>
+        <input class="form-control form-control-sm" id="mem-search" placeholder="木村"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();searchBacklogUsers();}">
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-outline-secondary btn-sm w-100" onclick="searchBacklogUsers()">検索</button>
+      </div>
+      <div class="col-md-6"><div id="mem-search-results" class="small"></div></div>
+    </div>
+    <div class="row g-2 align-items-end">
+      <div class="col-md-3"><input class="form-control form-control-sm" id="mem-name" placeholder="名前"></div>
+      <div class="col-md-3"><input class="form-control form-control-sm" id="mem-backlog" placeholder="Backlog user_id（数値）"></div>
+      <div class="col-md-3"><input class="form-control form-control-sm" id="mem-slack" placeholder="Slack user_id（U...）"></div>
+      <div class="col-md-3"><button class="btn btn-wasabi btn-sm w-100" onclick="addMember()">メンバー追加</button></div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+const TEAM_ID = "{{ team_id }}";
+let TEAM = null;
+
+async function loadTeam() {
+  try {
+    TEAM = await api(`/api/teams/${TEAM_ID}`);
+    document.getElementById("page-title").textContent = `チーム設定: ${TEAM.team_name}（${TEAM_ID}）`;
+    document.getElementById("f-team-name").value = TEAM.team_name || "";
+    document.getElementById("f-active").value = String(!!TEAM.active);
+    document.getElementById("f-transfer").value = String(!!TEAM.transfer_enabled);
+    document.getElementById("f-transfer-mode").value = TEAM.transfer_mode || "single_project";
+    document.getElementById("f-project-key").value = TEAM.report_project_key || "";
+    document.getElementById("f-meet-folder").value = TEAM.google_meet_folder_id || "";
+    document.getElementById("f-shared-project").value = (TEAM.shared_info || {}).project_key || "";
+    document.getElementById("f-shared-type").value = (TEAM.shared_info || {}).issue_type_id || "";
+    document.getElementById("f-exclude").value = (TEAM.exclude_projects || []).join("\n");
+    document.getElementById("f-admin-slack").value = (TEAM.admin_slack_ids || []).join("\n");
+    document.getElementById("save-note").textContent =
+      TEAM.updated_at ? `最終更新: ${String(TEAM.updated_at).slice(0,16).replace("T"," ")} by ${TEAM.updated_by || "?"}` : "";
+    renderMappings();
+    renderMembers();
+  } catch (e) { toast(`読み込み失敗: ${e.message}`, false); }
+}
+
+function renderMappings() {
+  const tbody = document.querySelector("#mapping-table tbody");
+  const entries = Object.entries(TEAM.channel_mapping || {});
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="text-muted small">マッピングなし（すべて自動判別で転記されます）</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(([ch, m]) => `
+    <tr>
+      <td>#${ch}</td>
+      <td class="small text-muted">${m.channel_id || "—"}</td>
+      <td>${m.parent_issue_key || '<span class="text-muted">自動判別</span>'}</td>
+      <td class="small">${m.label || ""}</td>
+      <td class="small text-muted">${(m.related_meeting_keywords || []).join(", ")}</td>
+      <td>${IS_ADMIN ? `<button class="btn btn-sm btn-outline-danger" onclick="deleteMapping('${ch}')">削除</button>` : ""}</td>
+    </tr>`).join("");
+}
+
+function renderMembers() {
+  const tbody = document.querySelector("#members-table tbody");
+  const members = TEAM.members || [];
+  if (!members.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="text-muted small">メンバー未登録</td></tr>';
+    return;
+  }
+  tbody.innerHTML = members.map((m, i) => `
+    <tr id="mem-row-${i}">
+      <td>${m.name || ""}</td>
+      <td>${m.backlog_user_id ? m.backlog_user_id : '<span class="badge bg-warning text-dark">未設定</span>'}</td>
+      <td>${m.slack_user_id || '<span class="badge bg-warning text-dark">未設定</span>'}</td>
+      <td>${IS_ADMIN ? `
+        <button class="btn btn-sm btn-outline-secondary" onclick="editMember(${i})">編集</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="removeMember(${i})">削除</button>` : ""}</td>
+    </tr>`).join("");
+}
+
+function editMember(idx) {
+  const m = (TEAM.members || [])[idx];
+  if (!m) return;
+  const row = document.getElementById(`mem-row-${idx}`);
+  row.innerHTML = `
+    <td><input class="form-control form-control-sm" id="edit-name-${idx}" value="${m.name || ""}"></td>
+    <td><input class="form-control form-control-sm" id="edit-backlog-${idx}" value="${m.backlog_user_id || ""}"></td>
+    <td><input class="form-control form-control-sm" id="edit-slack-${idx}" value="${m.slack_user_id || ""}"></td>
+    <td>
+      <button class="btn btn-sm btn-wasabi" onclick="saveMember(${idx})">保存</button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="renderMembers()">取消</button>
+    </td>`;
+}
+
+function parseBacklogId(raw) {
+  // 全角数字を半角に変換し、数字以外を除去して解釈する
+  const normalized = String(raw)
+    .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/[^\d]/g, "");
+  return normalized ? Number(normalized) : 0;
+}
+
+async function saveMember(idx) {
+  const name = document.getElementById(`edit-name-${idx}`).value.trim();
+  const backlogRaw = document.getElementById(`edit-backlog-${idx}`).value.trim();
+  const backlog_user_id = parseBacklogId(backlogRaw);
+  if (backlogRaw && !backlog_user_id) {
+    toast("Backlog user_id は数値で入力してください", false);
+    return;
+  }
+  const slack_user_id = document.getElementById(`edit-slack-${idx}`).value.trim();
+  const members = [...(TEAM.members || [])];
+  members[idx] = { name, backlog_user_id, slack_user_id };
+  try {
+    await api(`/api/teams/${TEAM_ID}`, { method: "PUT", body: JSON.stringify({ members }) });
+    toast("メンバーを更新しました");
+    loadTeam();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function saveBasic() {
+  try {
+    const body = {
+      team_name: document.getElementById("f-team-name").value.trim(),
+      active: document.getElementById("f-active").value === "true",
+      transfer_enabled: document.getElementById("f-transfer").value === "true",
+      transfer_mode: document.getElementById("f-transfer-mode").value,
+      report_project_key: document.getElementById("f-project-key").value.trim(),
+      google_meet_folder_id: document.getElementById("f-meet-folder").value.trim(),
+      shared_info: {
+        project_key: document.getElementById("f-shared-project").value.trim(),
+        issue_type_id: Number(document.getElementById("f-shared-type").value) || 0,
+      },
+      exclude_projects: document.getElementById("f-exclude").value.split("\n").map(s => s.trim()).filter(Boolean),
+      admin_slack_ids: document.getElementById("f-admin-slack").value.split("\n").map(s => s.trim()).filter(Boolean),
+    };
+    await api(`/api/teams/${TEAM_ID}`, { method: "PUT", body: JSON.stringify(body) });
+    toast("保存しました");
+    loadTeam();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function validateIssue() {
+  const key = document.getElementById("m-issue").value.trim();
+  const note = document.getElementById("issue-check");
+  if (!key) { note.textContent = ""; return; }
+  try {
+    const r = await api(`/api/validate/issue/${key}`);
+    note.innerHTML = r.valid
+      ? `<span class="text-success">✅ ${key}: ${r.summary}</span>`
+      : `<span class="text-danger">⚠️ ${r.reason}</span>`;
+  } catch (e) { note.innerHTML = `<span class="text-danger">検証失敗: ${e.message}</span>`; }
+}
+
+async function addMapping() {
+  try {
+    const body = {
+      channel_name: document.getElementById("m-channel").value.trim(),
+      channel_id: document.getElementById("m-channel-id").value.trim(),
+      parent_issue_key: document.getElementById("m-issue").value.trim(),
+      related_meeting_keywords: document.getElementById("m-keywords").value
+        .split(",").map(s => s.trim()).filter(Boolean),
+    };
+    const r = await api(`/api/teams/${TEAM_ID}/mappings`, { method: "POST", body: JSON.stringify(body) });
+    toast(`マッピングを追加しました${r.label ? `（${r.label}）` : ""}`);
+    ["m-channel", "m-channel-id", "m-issue", "m-keywords"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("issue-check").textContent = "";
+    loadTeam();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function deleteMapping(ch) {
+  if (!confirm(`#${ch} のマッピングを削除しますか？`)) return;
+  try {
+    await api(`/api/teams/${TEAM_ID}/mappings/${encodeURIComponent(ch)}`, { method: "DELETE" });
+    toast("削除しました");
+    loadTeam();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function searchBacklogUsers() {
+  const q = document.getElementById("mem-search").value.trim();
+  const box = document.getElementById("mem-search-results");
+  box.innerHTML = '<span class="text-muted">検索中...</span>';
+  try {
+    const r = await api(`/api/teams/${TEAM_ID}/backlog-users?q=${encodeURIComponent(q)}`);
+    if (!r.users.length) {
+      box.innerHTML = `<span class="text-muted">プロジェクト ${r.project_key} に該当ユーザーが見つかりません</span>`;
+      return;
+    }
+    box.innerHTML = r.users.map(u =>
+      `<button type="button" class="btn btn-sm btn-outline-success me-1 mb-1"
+        onclick="pickBacklogUser('${(u.name || "").replace(/'/g, "\\'")}', ${u.id})">
+        ${u.name}（${u.id}）</button>`).join("");
+  } catch (e) {
+    box.innerHTML = `<span class="text-danger">${e.message}</span>`;
+  }
+}
+
+function pickBacklogUser(name, id) {
+  document.getElementById("mem-name").value = name;
+  document.getElementById("mem-backlog").value = id;
+  document.getElementById("mem-search-results").innerHTML =
+    `<span class="text-success">✅ ${name}（${id}）を入力しました。Slack user_id を入れて追加してください</span>`;
+}
+
+async function addMember() {
+  try {
+    const backlogRaw = document.getElementById("mem-backlog").value.trim();
+    const backlog_user_id = parseBacklogId(backlogRaw);
+    if (backlogRaw && !backlog_user_id) {
+      toast("Backlog user_id は数値で入力してください", false);
+      return;
+    }
+    const members = [...(TEAM.members || []), {
+      name: document.getElementById("mem-name").value.trim(),
+      backlog_user_id,
+      slack_user_id: document.getElementById("mem-slack").value.trim(),
+    }];
+    await api(`/api/teams/${TEAM_ID}`, { method: "PUT", body: JSON.stringify({ members }) });
+    toast("メンバーを追加しました");
+    ["mem-name", "mem-backlog", "mem-slack"].forEach(id => document.getElementById(id).value = "");
+    loadTeam();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function removeMember(idx) {
+  const members = (TEAM.members || []).filter((_, i) => i !== idx);
+  try {
+    await api(`/api/teams/${TEAM_ID}`, { method: "PUT", body: JSON.stringify({ members }) });
+    toast("メンバーを削除しました");
+    loadTeam();
+  } catch (e) { toast(e.message, false); }
+}
+
+loadTeam();
+</script>
+{% endblock %}

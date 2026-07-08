@@ -244,14 +244,21 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
             logger.info(f"カレンダーレポート: {cal_path}")
 
     # ------------------------------------------------------------------ #
-    # 7. Backlog 転記
+    # 7. Backlog 転記（チームプロファイル: wasabi_teams を参照）
     # ------------------------------------------------------------------ #
-    if cfg_report.get("auto_post_to_backlog", True):
+    from src.team_config import load_team
+    team = load_team(config=config)
+    _transfer_mode = team.get("transfer_mode", "single_project")
+    if not team.get("transfer_enabled", True):
+        logger.info("\n--- Backlog 転記: チーム設定で無効のためスキップ ---")
+    elif _transfer_mode != "single_project":
+        logger.warning(f"\n--- Backlog 転記: 未対応の転記方式 ({_transfer_mode}) のためスキップ ---")
+    elif cfg_report.get("auto_post_to_backlog", True):
         logger.info("\n--- Backlog 転記 ---")
         poster = BacklogPoster(
             client=backlog_client,
-            report_project_key=cfg_backlog["report_project_key"],
-            channel_mapping=cfg_slack.get("channel_mapping", {}),
+            report_project_key=team.get("report_project_key") or cfg_backlog["report_project_key"],
+            channel_mapping=team.get("channel_mapping") or {},
             dry_run=cfg_report.get("dry_run", False),
         )
         results = poster.post_weekly_report(
@@ -269,7 +276,8 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
     cfg_kb = config.get("knowledge_base", {})
     if cfg_kb.get("enabled", False):
         logger.info("\n--- ナレッジベース生成 ---")
-        team_members = config.get("team_members", [])
+        # チームプロファイル（wasabi_teams）のメンバーを優先、未設定なら config.yaml
+        team_members = team.get("members") or config.get("team_members", [])
         # チームメンバー分の Backlog 活動を追加収集
         if team_members:
             logger.info(f"チームメンバー {len(team_members)} 名分の活動を追加収集")
@@ -579,8 +587,9 @@ def run_only_mode(config: dict, only: str, reference_dt: datetime = None) -> Non
         sc = SlackClient(bot_token=cfg_slack_inner["bot_token"],
                          my_user_id=cfg_slack_inner["my_user_id"])
 
-        # チームメンバー分の Backlog 活動を追加収集
-        team_members = config.get("team_members", [])
+        # チームメンバー分の Backlog 活動を追加収集（wasabi_teams 優先）
+        from src.team_config import load_team as _load_team
+        team_members = _load_team(config=config).get("members") or config.get("team_members", [])
         if team_members:
             logger.info(f"チームメンバー {len(team_members)} 名分の活動を追加収集")
             for member in team_members:
@@ -732,13 +741,15 @@ def main():
             my_user_id=cfg_bl.get("my_user_id", 0),
         )
 
-        # Slack user_id → Backlog user_id マッピング（myself + team_members）
+        # Slack user_id → Backlog user_id マッピング（myself + wasabi_teams のメンバー）
+        from src.team_config import load_team as _load_team
+        _team = _load_team(config=config)
         slack_to_backlog: dict[str, int] = {}
         my_slack_id = cfg_slack.get("my_user_id", "")
         my_backlog_id = cfg_bl.get("my_user_id", 0)
         if my_slack_id and my_backlog_id:
             slack_to_backlog[my_slack_id] = my_backlog_id
-        for member in config.get("team_members", []):
+        for member in (_team.get("members") or config.get("team_members", [])):
             s_id = member.get("slack_user_id", "")
             b_id = member.get("backlog_user_id", 0)
             if s_id and b_id:
@@ -759,6 +770,7 @@ def main():
             backlog_client=bl_client,
             shared_info_cfg=shared_info_cfg,
             slack_user_to_backlog=slack_to_backlog,
+            config=config,
         )
         bot.run()
         return
