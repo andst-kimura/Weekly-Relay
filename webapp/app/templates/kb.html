@@ -1,0 +1,141 @@
+{% extends "_base.html" %}
+{% block title %}KB 探索 | Wasabi Admin{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">📚 KB 探索</h4>
+  <span class="small text-muted" id="kb-total"></span>
+</div>
+
+<div class="card p-3 mb-3">
+  <div class="row g-2 align-items-center">
+    <div class="col-md-7">
+      <input class="form-control" id="kb-query" placeholder="意味検索（例: ポスタスの追加カスタマイズの経緯）"
+             onkeydown="if(event.key==='Enter'){searchKb();}">
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-wasabi w-100" onclick="searchKb()">検索</button>
+    </div>
+    <div class="col-md-3">
+      <button class="btn btn-outline-secondary w-100" onclick="clearSearch()">一覧に戻る</button>
+    </div>
+  </div>
+</div>
+
+<ul class="nav nav-pills mb-3" id="type-tabs">
+  <li class="nav-item"><button class="nav-link active" data-type="" onclick="setType(this)">すべて</button></li>
+  <li class="nav-item"><button class="nav-link" data-type="backlog" onclick="setType(this)">チケット</button></li>
+  <li class="nav-item"><button class="nav-link" data-type="slack" onclick="setType(this)">Slack</button></li>
+  <li class="nav-item"><button class="nav-link" data-type="meeting" onclick="setType(this)">議事録</button></li>
+</ul>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr><th style="width:90px">種別</th><th>タイトル</th><th>プレビュー</th>
+            <th style="width:130px">同期日時</th><th style="width:70px"></th></tr>
+      </thead>
+      <tbody id="kb-tbody"><tr><td colspan="5" class="text-muted">読み込み中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 全文モーダル -->
+<div class="modal fade" id="docModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title" id="doc-title"></h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="small text-muted mb-2" id="doc-meta"></div>
+        <pre style="white-space:pre-wrap; font-family:inherit; font-size:.9rem" id="doc-body"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let TYPE = "";
+const TYPE_BADGE = {
+  backlog: '<span class="badge bg-primary">チケット</span>',
+  slack:   '<span class="badge bg-info text-dark">Slack</span>',
+  meeting: '<span class="badge bg-success">議事録</span>',
+};
+
+function badge(t) { return TYPE_BADGE[t] || `<span class="badge bg-secondary">${t}</span>`; }
+
+function rowHtml(d) {
+  const link = d.source_url ? ` <a href="${d.source_url}" target="_blank" rel="noopener">↗</a>` : "";
+  const score = d.score !== undefined ? `<span class="badge bg-warning text-dark me-1">${d.score.toFixed(2)}</span>` : "";
+  return `<tr style="cursor:pointer" onclick="openDoc('${d.doc_id}')">
+    <td>${badge(d.source_type)}</td>
+    <td>${score}${d.source_name || d.source_key || d.doc_id}${link}</td>
+    <td class="small text-muted">${(d.preview || "").replace(/</g, "&lt;")}</td>
+    <td class="small text-muted">${(d.synced_at || "").replace("T", " ")}</td>
+    <td><button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation();openDoc('${d.doc_id}')">全文</button></td>
+  </tr>`;
+}
+
+async function loadDocs() {
+  const tbody = document.getElementById("kb-tbody");
+  tbody.innerHTML = '<tr><td colspan="5" class="text-muted">読み込み中...</td></tr>';
+  try {
+    const r = await api(`/api/kb/docs?type=${TYPE}&limit=100`);
+    document.getElementById("kb-total").textContent = `全 ${r.total} 件`;
+    tbody.innerHTML = r.docs.length
+      ? r.docs.map(rowHtml).join("")
+      : '<tr><td colspan="5" class="text-muted">ドキュメントがありません</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="text-danger">${e.message}</td></tr>`;
+  }
+}
+
+async function searchKb() {
+  const q = document.getElementById("kb-query").value.trim();
+  if (!q) { loadDocs(); return; }
+  const tbody = document.getElementById("kb-tbody");
+  tbody.innerHTML = '<tr><td colspan="5" class="text-muted">検索中...</td></tr>';
+  try {
+    const r = await api(`/api/kb/search?q=${encodeURIComponent(q)}&type=${TYPE}`);
+    document.getElementById("kb-total").textContent = `検索結果 ${r.results.length} 件`;
+    tbody.innerHTML = r.results.length
+      ? r.results.map(rowHtml).join("")
+      : '<tr><td colspan="5" class="text-muted">該当なし</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="text-danger">${e.message}</td></tr>`;
+  }
+}
+
+function clearSearch() {
+  document.getElementById("kb-query").value = "";
+  loadDocs();
+}
+
+function setType(el) {
+  document.querySelectorAll("#type-tabs .nav-link").forEach(b => b.classList.remove("active"));
+  el.classList.add("active");
+  TYPE = el.dataset.type;
+  const q = document.getElementById("kb-query").value.trim();
+  q ? searchKb() : loadDocs();
+}
+
+async function openDoc(docId) {
+  try {
+    const d = await api(`/api/kb/docs/${encodeURIComponent(docId)}`);
+    document.getElementById("doc-title").innerHTML = `${badge(d.source_type)} ${d.source_name || d.doc_id}`;
+    const link = d.source_url ? ` | <a href="${d.source_url}" target="_blank" rel="noopener">原文を開く ↗</a>` : "";
+    document.getElementById("doc-meta").innerHTML = `${d.doc_id} | 同期: ${(d.synced_at || "").replace("T", " ")}${link}`;
+    document.getElementById("doc-body").textContent = d.ai_text || "（本文なし）";
+    new bootstrap.Modal(document.getElementById("docModal")).show();
+  } catch (e) { toast(e.message, false); }
+}
+
+loadDocs();
+</script>
+{% endblock %}

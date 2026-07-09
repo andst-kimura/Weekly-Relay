@@ -48,7 +48,8 @@ class TestRequestWithRetry:
         result = client._get("projects")
         assert result == [{"id": 1}]
         assert client.session.request.call_count == 2
-        mock_sleep.assert_called_once_with(1)
+        # スロットラー（_throttle）も sleep を呼ぶため、リトライ待機の call(1) を含むことを確認
+        mock_sleep.assert_any_call(1)
 
     @patch("src.backlog_client.time.sleep")
     def test_raises_after_max_retries(self, mock_sleep):

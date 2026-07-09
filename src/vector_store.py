@@ -92,7 +92,7 @@ class VectorStore:
             "source_type": data.get("source_type", ""),
             "doc_id": doc_id,
         }
-        for key in ("source_key", "source_name", "project_id",
+        for key in ("source_key", "source_name", "project_id", "source_url",
                     "issue_key", "channel_name", "week_label", "display_name"):
             val = data.get(key)
             if val:
@@ -129,26 +129,63 @@ class VectorStore:
             logger.info(f"ハイブリッド検索: 課題キー直接ヒット {[h['doc_id'] for h in hits]}")
         return hits
 
-    def search(self, query: str, n_results: int = 5) -> list[dict]:
+    @staticmethod
+    def _doc_date(doc_id: str, data: dict) -> str:
+        """フィルタ用のドキュメント日付（YYYY-MM-DD）を種別に応じて返す"""
+        st = data.get("source_type", "")
+        if st == "backlog" and data.get("backlog_updated_at"):
+            return str(data["backlog_updated_at"])[:10]
+        if st == "meeting":
+            # doc_id 例: wasabi_sales_meeting_meeting_20260707_xxxx
+            m = re.search(r"_(\d{8})_", doc_id)
+            if m:
+                d = m.group(1)
+                return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        return str(data.get("synced_at", ""))[:10]
+
+    def _match_filters(self, doc_id: str, data: dict, filters: dict) -> bool:
+        """種別・期間フィルタの判定"""
+        st_filter = filters.get("source_type")
+        if st_filter and data.get("source_type", "") != st_filter:
+            return False
+        since = filters.get("since")   # "YYYY-MM-DD"
+        until = filters.get("until")
+        if since or until:
+            d = self._doc_date(doc_id, data)
+            if not d:
+                return False
+            if since and d < since:
+                return False
+            if until and d > until:
+                return False
+        return True
+
+    def search(self, query: str, n_results: int = 5, filters: dict = None) -> list[dict]:
         """クエリに意味的に近い KB ドキュメントを返す（課題キーは直接取得を併用）。
+
+        filters: {"source_type": "meeting", "since": "YYYY-MM-DD", "until": "YYYY-MM-DD"}
+                 のいずれか/組み合わせ。指定時は over-fetch してクライアント側で絞り込む。
         戻り値: [{"doc_id": str, "score": float, "text": str, "meta": dict}, ...]
         """
+        filters = filters or {}
         try:
             # ① キーワード（課題キー）直接ヒット
             keyword_hits = self._keyword_hits(query)
             seen = {h["doc_id"] for h in keyword_hits}
 
-            # ② ベクトル検索
+            # ② ベクトル検索（フィルタありなら多めに取得して絞り込む）
+            fetch_n = n_results * 4 if filters else n_results
             embedding = self._embed(query)
-            raw = self._sc.vector_search(embedding, n_results)
+            raw = self._sc.vector_search(embedding, fetch_n)
             vector_hits = [
                 self._to_result(item["doc_id"], item.get("data", {}), item["score"])
                 for item in raw
                 if item["doc_id"] not in seen
-            ]
+                and (not filters or self._match_filters(item["doc_id"], item.get("data", {}), filters))
+            ][:n_results]
 
-            # 直接ヒットを先頭に、全体で n_results + キーワード分まで
-            return (keyword_hits + vector_hits)[: n_results + len(keyword_hits)]
+            # 直接ヒットを先頭に
+            return keyword_hits + vector_hits
         except Exception as e:
             logger.warning(f"VectorStore search 失敗: {e}")
             return []

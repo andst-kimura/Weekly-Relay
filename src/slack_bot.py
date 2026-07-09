@@ -31,6 +31,7 @@ _KB_COLLECT_PREFIXES = ("情報収集", "kb収集", "全収集", "collect")
 _POST_PREFIXES = ("backlog転記", "転記", "post")
 _SETTINGS_PREFIXES = ("設定確認", "設定", "config")
 _MYID_PREFIXES = ("私のid", "自分のid", "myid", "my id")
+_TIMELINE_PREFIXES = ("経緯", "timeline")
 # 期間指定パターン（例: 7/1-7/7, 07/01〜07/07）
 _RANGE_RE = re.compile(
     r"(?P<m1>\d{1,2})/(?P<d1>\d{1,2})\s*[-〜~]\s*(?P<m2>\d{1,2})/(?P<d2>\d{1,2})"
@@ -45,8 +46,13 @@ _DATE_RE = re.compile(
 _HELP_TEXT = """\
 *Wasabi Bot* にようこそ！
 
-*KB 質問（KB 検索 + AI 回答）*
+*KB 質問（KB 検索 + AI 回答・出典リンク付き）*
 　`@Wasabi Bot ACE刷新の進捗は？`
+　`@Wasabi Bot 種別:議事録 期間:今週 ポスタスの議論`（絞り込み）
+　スレッド内の追い質問は文脈を引き継ぎます
+
+*経緯サマリー（課題の時系列まとめ）*
+　`@Wasabi Bot 経緯 SALES_TEAM-27`
 
 *進捗メモの登録（週次レポートの情報源に追加）*
 　`@Wasabi Bot メモ SALES_TEAM-23: ポスタスのエラーは解消済み。6/27本番反映予定`
@@ -85,6 +91,51 @@ _HELP_TEXT = """\
 
 KB が空の場合は `python main.py --only kb` を実行してインデックスを更新してください。
 """
+
+
+# フィルタ構文: 種別:議事録 / 期間:今週 等
+_TYPE_FILTER_RE = re.compile(r"種別[:：]\s*(議事録|会議|チケット|backlog|slack|meeting)", re.IGNORECASE)
+_PERIOD_FILTER_RE = re.compile(
+    r"期間[:：]\s*(今週|今月|先週|\d+日|\d{1,2}/\d{1,2}\s*[-〜~]\s*\d{1,2}/\d{1,2})")
+_TYPE_MAP = {
+    "議事録": "meeting", "会議": "meeting", "meeting": "meeting",
+    "チケット": "backlog", "backlog": "backlog",
+    "slack": "slack",
+}
+
+
+def _extract_filters(text: str) -> tuple[str, dict]:
+    """質問文から `種別:` `期間:` フィルタを抽出し、(残りの質問文, filters) を返す"""
+    filters: dict = {}
+    now = datetime.now()
+
+    m = _TYPE_FILTER_RE.search(text)
+    if m:
+        filters["source_type"] = _TYPE_MAP.get(m.group(1).lower(), "")
+        text = _TYPE_FILTER_RE.sub("", text)
+
+    m = _PERIOD_FILTER_RE.search(text)
+    if m:
+        token = m.group(1).replace(" ", "")
+        if token == "今週":
+            monday = now - timedelta(days=now.weekday())
+            filters["since"] = monday.strftime("%Y-%m-%d")
+        elif token == "先週":
+            monday = now - timedelta(days=now.weekday())
+            filters["since"] = (monday - timedelta(days=7)).strftime("%Y-%m-%d")
+            filters["until"] = (monday - timedelta(days=1)).strftime("%Y-%m-%d")
+        elif token == "今月":
+            filters["since"] = now.strftime("%Y-%m-01")
+        elif token.endswith("日"):
+            days = int(token[:-1])
+            filters["since"] = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        else:
+            since, until = _parse_range(token)
+            filters["since"] = since.strftime("%Y-%m-%d")
+            filters["until"] = until.strftime("%Y-%m-%d")
+        text = _PERIOD_FILTER_RE.sub("", text)
+
+    return text.strip(" 　"), filters
 
 
 def _parse_range(text: str, default_days: int = 7) -> tuple[datetime, datetime]:
@@ -402,6 +453,72 @@ class SlackBot:
     # ------------------------------------------------------------------ #
     #  手動実行: 全 KB 収集（Backlog + Slack + 議事録）
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    #  経緯サマリーコマンド（課題の時系列まとめ）
+    # ------------------------------------------------------------------ #
+
+    def _handle_timeline(self, raw_text: str, say_fn, kwargs: dict) -> None:
+        """課題の経緯サマリーをバックグラウンド生成してスレッドに返信する"""
+        m = _ISSUE_KEY_RE.search(raw_text)
+        if not m:
+            say_fn(
+                text="課題キーを指定してください。\n例: `経緯 SALES_TEAM-27`",
+                **kwargs,
+            )
+            return
+        if not self.bl:
+            say_fn(text="⚠️ Backlog クライアントが設定されていないため実行できません。", **kwargs)
+            return
+        issue_key = m.group(1)
+        say_fn(text=f"🔄 {issue_key} の経緯をまとめています...", **kwargs)
+
+        def _worker():
+            try:
+                # Backlog API から最新の課題 + 全コメント（KB より鮮度が高い）
+                issue = self.bl.get_issue(issue_key)
+                comments = self.bl.get_all_comments(issue["id"])
+                comments_text = "\n".join(
+                    f"[{(c.get('created') or '')[:10]}] "
+                    f"{(c.get('createdUser') or {}).get('name', '不明')}: "
+                    f"{(c.get('content') or '')[:500]}"
+                    for c in comments if (c.get("content") or "").strip()
+                )
+                # KB の ai_text を補助文脈に
+                kb_text = ""
+                try:
+                    from src import smartsync_client as sc
+                    from src.team_config import list_teams
+                    team_ids = [t["team_id"] for t in list_teams()] or ["sales"]
+                    for tid in team_ids:
+                        doc = sc.get_context_snapshot(f"wasabi_{tid}_backlog_{issue_key}")
+                        if doc:
+                            kb_text = doc.get("ai_text", "")
+                            break
+                except Exception:
+                    pass
+
+                answer = self.gemini.summarize_timeline(
+                    issue_key=issue_key,
+                    summary=issue.get("summary", ""),
+                    status=(issue.get("status") or {}).get("name", ""),
+                    comments_text=comments_text,
+                    kb_text=kb_text,
+                )
+                if not answer:
+                    say_fn(text="⚠️ 経緯サマリーの生成に失敗しました。", **kwargs)
+                    return
+                issue_url = f"{self.bl.base_url}/view/{issue_key}"
+                say_fn(
+                    text=f"📜 *{issue_key} {issue.get('summary', '')}*\n\n{answer}"
+                         f"\n\n🔗 <{issue_url}|Backlog で開く>",
+                    **kwargs,
+                )
+            except Exception as e:
+                logger.error(f"経緯サマリー失敗 ({issue_key}): {e}")
+                say_fn(text=f"⚠️ 経緯サマリーの生成に失敗しました: {e}", **kwargs)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ------------------------------------------------------------------ #
     #  設定コマンド（wasabi_teams の簡易設定）
@@ -730,7 +847,11 @@ class SlackBot:
                 # Slack はチャンネルメンション形式（クリックでチャンネルへ）
                 lines.append(f"・<#{key}> の週次まとめ")
             elif st == "meeting":
-                lines.append(f"・議事録: {name}")
+                url = meta.get("source_url", "")
+                if url:
+                    lines.append(f"・議事録: <{url}|{name or 'Google Docs'}>")
+                else:
+                    lines.append(f"・議事録: {name}")
             else:
                 lines.append(f"・{name or doc_id}")
         if not lines:
@@ -769,9 +890,11 @@ class SlackBot:
                 "KB にデータがありません。\n"
                 "`python main.py --only kb` を実行してインデックスを構築してください。"
             )
+        # フィルタ構文（種別: / 期間:）を抽出
+        query, filters = _extract_filters(query)
         # 指示語を含む短い質問は、履歴と結合して検索クエリを補強する
         search_query = f"{history}\n{query}" if (history and len(query) <= 30) else query
-        results = self.vs.search(search_query, n_results=self.n_results)
+        results = self.vs.search(search_query, n_results=self.n_results, filters=filters)
         if not results:
             return "KB に該当情報が見つかりませんでした。"
         answer = self.gemini.answer_with_context(query, results, history=history)
@@ -820,6 +943,11 @@ class SlackBot:
         # Backlog 転記コマンド（プレビュー → ボタン確認）
         if any(text.lower().startswith(p.lower()) for p in _POST_PREFIXES):
             self._handle_post_preview(text, say_fn, kwargs)
+            return None, None
+
+        # 経緯サマリーコマンド
+        if any(text.lower().startswith(p.lower()) for p in _TIMELINE_PREFIXES):
+            self._handle_timeline(text, say_fn, kwargs)
             return None, None
 
         # 私のID（メンバー登録用の Slack ID 確認）

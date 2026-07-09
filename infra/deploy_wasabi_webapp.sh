@@ -21,7 +21,7 @@ gcloud run deploy "${SERVICE}" \
   --project="${PROJECT_ID}" \
   --service-account="${SA_EMAIL}" \
   --set-env-vars="SMARTSYNC_FIRESTORE_DATABASE=smart-sync-stg,DEBUG_MODE=false,BACKLOG_BASE_URL=https://adastria.backlog.jp" \
-  --set-secrets="BACKLOG_API_KEY=wasabi-backlog-api-key:latest" \
+  --set-secrets="BACKLOG_API_KEY=wasabi-backlog-api-key:latest,GEMINI_API_KEY=wasabi-gemini-api-key:latest" \
   --memory=512Mi \
   --cpu=1 \
   --min-instances=0 \

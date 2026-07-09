@@ -23,6 +23,14 @@ async def index(request: Request, user: CurrentUser = Depends(get_current_user))
     )
 
 
+@router.get("/kb", response_class=HTMLResponse)
+async def kb_explorer(request: Request, user: CurrentUser = Depends(get_current_user)):
+    return templates.TemplateResponse(
+        request=request, name="kb.html",
+        context={"user": user},
+    )
+
+
 @router.get("/teams/{team_id}", response_class=HTMLResponse)
 async def team_detail(request: Request, team_id: str,
                        user: CurrentUser = Depends(get_current_user)):

@@ -3,7 +3,9 @@ CleanupTool の単体テスト
 """
 import pytest
 from unittest.mock import MagicMock, patch
-from src.cleanup import CleanupTool, _WR_SIGNATURE
+from src.cleanup import CleanupTool, _WR_SIGNATURES
+
+_WR_SIGNATURE = _WR_SIGNATURES[0]
 
 
 def make_client(comments=None, parent_issues=None):

@@ -184,6 +184,39 @@ _RAG_PROMPT = """\
 - 情報源・ドキュメントIDは記載しない（システムが回答の後に自動で付与する）
 """
 
+# 課題の経緯サマリー（時系列）を生成するプロンプト
+_TIMELINE_PROMPT = """\
+あなたは社内業務のアシスタントです。
+以下の Backlog 課題の情報から、経緯サマリーを作成してください。
+引き継ぎ・上長への説明にそのまま使える品質を目指してください。
+
+## 課題
+{issue_key}: {summary}（ステータス: {status}）
+
+## コメント履歴（時系列・古い順）
+{comments_text}
+
+## ナレッジベースの補足情報
+{kb_text}
+
+## 出力形式（この構成・見出しで出力する）
+*■ 概要*
+（この課題が何か・2〜3行）
+
+*■ 経緯（時系列）*
+・MM/DD 出来事（重要な出来事のみ・5〜10項目程度）
+
+*■ 現状*
+（いまどうなっているか・2〜3行）
+
+*■ 未解決事項・次のアクション*
+・（なければ「特になし」）
+
+## ルール
+- 提供された情報のみを使う。推測で補完しない
+- 日本語で簡潔に。全体で800字以内
+"""
+
 # Gemini が議事録を生成できなかった場合のフレーズ（フィルタリング用）
 _EMPTY_MEETING_PHRASES = [
     "要約は生成されませんでした",
@@ -366,6 +399,22 @@ class GeminiClient:
             return self._call(prompt)
         except Exception as e:
             logger.warning(f"Gemini RAG回答生成失敗: {e}")
+            return ""
+
+    def summarize_timeline(self, issue_key: str, summary: str, status: str,
+                            comments_text: str, kb_text: str = "") -> str:
+        """課題の経緯サマリー（時系列）を生成する"""
+        if not self.enabled:
+            return ""
+        try:
+            prompt = _TIMELINE_PROMPT.format(
+                issue_key=issue_key, summary=summary, status=status,
+                comments_text=comments_text[:20000] or "（コメントなし）",
+                kb_text=kb_text[:5000] or "（なし）",
+            )
+            return self._call(prompt)
+        except Exception as e:
+            logger.warning(f"Gemini 経緯サマリー生成失敗: {e}")
             return ""
 
     def embed(self, text: str) -> list[float]:

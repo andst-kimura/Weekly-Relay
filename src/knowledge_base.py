@@ -322,6 +322,7 @@ class KnowledgeBase:
             "created_date": doc["created_date"].isoformat(),
             "raw_text": raw_text,
             "ai_summary": ai_summary,
+            "google_doc_id": doc.get("id", ""),   # 出典リンク（Docs URL）生成用
         }
 
         self._save_to_smartsync(doc_id, data, "議事録")

@@ -175,6 +175,10 @@ def convert(wasabi_doc_id: str, wasabi_data: dict) -> tuple[str, dict] | None:
             "knowledge_text": "\n\n".join(ai_text_parts),
             "synced_at": datetime.now(timezone.utc).isoformat(),
         }
+        # Google Docs へのリンク（出典表示用）
+        google_doc_id = wasabi_data.get("google_doc_id", "")
+        if google_doc_id:
+            sm_data["source_url"] = f"https://docs.google.com/document/d/{google_doc_id}/edit"
         return doc_id, sm_data
 
     else:
