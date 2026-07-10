@@ -15,6 +15,35 @@ logger = logging.getLogger(__name__)
 _ISSUE_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
 
 
+def _excerpt_around_terms(text: str, terms: list[str],
+                           window: int = 1200, max_len: int = 3000) -> str:
+    """キーワードの出現箇所周辺を抜粋する（複数箇所は連結）"""
+    if not text or not terms:
+        return ""
+    spans = []
+    for t in terms:
+        start = 0
+        while True:
+            idx = text.find(t, start)
+            if idx == -1:
+                break
+            spans.append((max(0, idx - window // 2), min(len(text), idx + window // 2)))
+            start = idx + len(t)
+    if not spans:
+        return ""
+    # 重なる区間をマージ
+    spans.sort()
+    merged = [spans[0]]
+    for s, e in spans[1:]:
+        if s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    parts = [("…" if s > 0 else "") + text[s:e] + ("…" if e < len(text) else "")
+             for s, e in merged]
+    return "\n---\n".join(parts)[:max_len]
+
+
 def _build_embed_text(doc_id: str, data: dict) -> str:
     """KB ドキュメントから埋め込み用の代表テキストを組み立てる"""
     src = data.get("source_type", "")
@@ -62,8 +91,11 @@ class VectorStore:
         embed_fn: text -> list[float] の callable（GeminiClient.embed）
     """
 
-    def __init__(self, embed_fn: Callable[[str], list[float]], firestore_client=None):
+    def __init__(self, embed_fn: Callable[[str], list[float]], firestore_client=None,
+                 term_expander: Callable[[str], list[str]] = None):
         self._embed = embed_fn
+        # クエリからキーワード+同義語を抽出する関数（GeminiClient.expand_search_terms）
+        self._expand_terms = term_expander
         from src import smartsync_client as _sc
         self._sc = _sc
         count = _sc.count_with_embedding()
@@ -169,11 +201,35 @@ class VectorStore:
         """
         filters = filters or {}
         try:
-            # ① キーワード（課題キー）直接ヒット
+            # ① 課題キーの直接ヒット
             keyword_hits = self._keyword_hits(query)
             seen = {h["doc_id"] for h in keyword_hits}
 
-            # ② ベクトル検索（フィルタありなら多めに取得して絞り込む）
+            # ② キーワード全文スキャン（略語→正式名称の展開つき）
+            #    ベクトル検索が拾えない「長文中の一言及」を補完する
+            term_hits: list[dict] = []
+            if self._expand_terms:
+                try:
+                    terms = self._expand_terms(query)
+                    if terms:
+                        for doc_id, data, count in self._sc.scan_context_snapshots(terms, max_hits=3):
+                            if doc_id in seen:
+                                continue
+                            if filters and not self._match_filters(doc_id, data, filters):
+                                continue
+                            hit = self._to_result(doc_id, data, score=0.9)
+                            # 長文の場合、マッチ箇所周辺の抜粋を渡す（先頭3000字切りだと
+                            # 後半のキーワード言及部分が Gemini に届かないため）
+                            hit["text"] = _excerpt_around_terms(
+                                data.get("ai_text", ""), terms) or hit["text"]
+                            term_hits.append(hit)
+                            seen.add(doc_id)
+                        if term_hits:
+                            logger.info(f"キーワードスキャン: {terms} → {[h['doc_id'] for h in term_hits]}")
+                except Exception as e:
+                    logger.warning(f"キーワードスキャン失敗（ベクトル検索のみで継続）: {e}")
+
+            # ③ ベクトル検索（フィルタありなら多めに取得して絞り込む）
             fetch_n = n_results * 4 if filters else n_results
             embedding = self._embed(query)
             raw = self._sc.vector_search(embedding, fetch_n)
@@ -184,8 +240,8 @@ class VectorStore:
                 and (not filters or self._match_filters(item["doc_id"], item.get("data", {}), filters))
             ][:n_results]
 
-            # 直接ヒットを先頭に
-            return keyword_hits + vector_hits
+            # 直接ヒット → キーワードヒット → ベクトルヒットの順
+            return keyword_hits + term_hits + vector_hits
         except Exception as e:
             logger.warning(f"VectorStore search 失敗: {e}")
             return []

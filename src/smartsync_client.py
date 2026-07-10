@@ -93,6 +93,47 @@ def list_context_snapshots_without_embedding(page_size: int = 300) -> list[tuple
     return [(doc_id, data) for doc_id, data in all_docs if "embedding" not in data]
 
 
+def scan_context_snapshots(terms: list[str], max_hits: int = 5) -> list[tuple[str, dict, int]]:
+    """context_snapshots をキーワードで全文スキャンする（embedding は取得しない）。
+
+    ベクトル検索が拾えない「長文中の一言及」を補完するための経路。
+    戻り値: [(doc_id, data, match_count)] を一致数の多い順。
+    """
+    if not terms:
+        return []
+    url = _col_url("context_snapshots")
+    params: list = [
+        ("pageSize", 300),
+        # embedding（768 float）を除外して転送量を抑える
+        ("mask.fieldPaths", "ai_text"),
+        ("mask.fieldPaths", "source_name"),
+        ("mask.fieldPaths", "source_type"),
+        ("mask.fieldPaths", "source_key"),
+        ("mask.fieldPaths", "source_url"),
+        ("mask.fieldPaths", "synced_at"),
+    ]
+    session = _get_session()
+    hits: list[tuple[str, dict, int]] = []
+    page_token = None
+    while True:
+        p = list(params) + ([("pageToken", page_token)] if page_token else [])
+        resp = session.get(url, params=p, timeout=60)
+        resp.raise_for_status()
+        body = resp.json()
+        for doc in body.get("documents", []):
+            doc_id = doc["name"].split("/")[-1]
+            data = _parse_doc(doc) or {}
+            haystack = f"{data.get('source_name', '')}\n{data.get('ai_text', '')}"
+            count = sum(haystack.count(t) for t in terms)
+            if count > 0:
+                hits.append((doc_id, data, count))
+        page_token = body.get("nextPageToken")
+        if not page_token:
+            break
+    hits.sort(key=lambda x: -x[2])
+    return hits[:max_hits]
+
+
 def get_context_snapshot(doc_id: str) -> dict | None:
     """context_snapshots から 1 件取得する（存在しなければ None）"""
     url = _doc_url("context_snapshots", doc_id)

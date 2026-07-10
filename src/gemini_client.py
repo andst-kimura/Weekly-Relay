@@ -401,6 +401,34 @@ class GeminiClient:
             logger.warning(f"Gemini RAG回答生成失敗: {e}")
             return ""
 
+    def expand_search_terms(self, query: str) -> list[str]:
+        """検索クエリから重要キーワードと同義語・正式名称を抽出する（キーワード検索用）。
+
+        例: 「マケプレの進捗」→ ["マケプレ", "マーケットプレイス"]
+        失敗時は空リスト（呼び出し側でフォールバック）。
+        """
+        if not self.enabled:
+            return []
+        prompt = (
+            "以下の社内システムへの検索クエリから、全文検索に使うキーワードを抽出してください。\n"
+            "・固有名詞・プロジェクト名・システム名を優先する\n"
+            "・略語には正式名称/別表記を追加する（例: マケプレ→マーケットプレイス）\n"
+            "・「進捗」「概要」「教えて」のような一般語は含めない\n"
+            "・JSON 配列のみを出力（例: [\"マケプレ\", \"マーケットプレイス\"]）\n\n"
+            f"クエリ: {query}"
+        )
+        try:
+            import json as _json
+            raw = self._call(prompt) or ""
+            start, end = raw.find("["), raw.rfind("]")
+            if start == -1 or end == -1:
+                return []
+            terms = _json.loads(raw[start:end + 1])
+            return [str(t) for t in terms if str(t).strip()][:6]
+        except Exception as e:
+            logger.warning(f"検索キーワード抽出失敗: {e}")
+            return []
+
     def summarize_timeline(self, issue_key: str, summary: str, status: str,
                             comments_text: str, kb_text: str = "") -> str:
         """課題の経緯サマリー（時系列）を生成する"""

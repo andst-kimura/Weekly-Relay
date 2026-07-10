@@ -697,7 +697,7 @@ def main():
             logger.error("--search には gemini.enabled: true が必要です")
             return
         from src.vector_store import VectorStore
-        vs = VectorStore(embed_fn=gemini.embed)
+        vs = VectorStore(embed_fn=gemini.embed, term_expander=gemini.expand_search_terms)
         logger.info(f"🔍 \"{args.search}\" を検索中 ... （{vs.count()} 件インデックス済み）")
         results = vs.search(args.search, n_results=5)
         if not results:
@@ -741,7 +741,7 @@ def main():
         from src.slack_bot import SlackBot
         cfg_fs = config.get("firestore", {})
         fs_client = FirestoreClient() if cfg_fs.get("enabled", False) else None
-        vs = VectorStore(embed_fn=gemini.embed)
+        vs = VectorStore(embed_fn=gemini.embed, term_expander=gemini.expand_search_terms)
 
         # Backlog クライアント（共有事項起票用）
         cfg_bl = config.get("backlog", {})
@@ -801,7 +801,7 @@ def main():
             return
         from src.vector_store import VectorStore
         from src.smartsync_client import list_context_snapshots_without_embedding
-        vs = VectorStore(embed_fn=gemini.embed)
+        vs = VectorStore(embed_fn=gemini.embed, term_expander=gemini.expand_search_terms)
         docs = list_context_snapshots_without_embedding()
         if not docs:
             logger.info("embedding 未設定のドキュメントはありません（すべて同期済み）")
