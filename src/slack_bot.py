@@ -811,11 +811,21 @@ class SlackBot:
             try:
                 from src.manual_jobs import execute_backlog_post
                 results = execute_backlog_post(self._config, prepared)
+                base_url = (self._config.get("backlog", {}) or {}).get(
+                    "base_url", "https://adastria.backlog.jp").rstrip("/")
+                _ACTION_LABEL = {"commented": "コメント転記", "created": "新規起票", "skipped": "スキップ"}
                 lines = [f"✅ Backlog 転記が完了しました（{len(results)} 件）"]
-                for r in results[:10]:
-                    lines.append(f"　・{r}")
-                if len(results) > 10:
-                    lines.append(f"　…ほか {len(results) - 10} 件")
+                for r in results[:15]:
+                    if isinstance(r, dict):
+                        key = r.get("issue_key", "")
+                        action = _ACTION_LABEL.get(r.get("action", ""), r.get("action", ""))
+                        link = f"<{base_url}/view/{key}|{key}>" if key else "(不明)"
+                        lines.append(f"　・{link}　{action}")
+                    else:
+                        lines.append(f"　・{str(r)[:80]}")
+                if len(results) > 15:
+                    lines.append(f"　…ほか {len(results) - 15} 件")
+                lines.append("内容は各課題のコメントを確認してください。")
                 say_fn(text="\n".join(lines))
             except Exception as e:
                 logger.error(f"Backlog 転記失敗: {e}")
