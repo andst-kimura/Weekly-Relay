@@ -851,8 +851,12 @@ class SlackBot:
             key = meta.get("source_key", "")
             name = meta.get("source_name", "")
             if st == "backlog" and key:
-                # Backlog 課題への直接リンク
-                lines.append(f"・<{base_url}/view/{key}|{key}>　{name}")
+                if _ISSUE_KEY_RE.match(key):
+                    # 課題キー → 課題への直接リンク
+                    lines.append(f"・<{base_url}/view/{key}|{key}>　{name}")
+                else:
+                    # プロジェクトキー（SmartSync の集約ドキュメント）→ プロジェクトリンク
+                    lines.append(f"・<{base_url}/projects/{key}|{name or key}>（プロジェクト週次まとめ）")
             elif st == "slack" and key:
                 # Slack はチャンネルメンション形式（クリックでチャンネルへ）
                 lines.append(f"・<#{key}> の週次まとめ")
@@ -891,6 +895,35 @@ class SlackBot:
             return "\n".join(lines[-limit:])
         except Exception as e:
             logger.warning(f"スレッド履歴取得失敗: {e}")
+            return ""
+
+    def _fetch_dm_history(self, channel: str, current_ts: str = "", limit: int = 6) -> str:
+        """DM のフラットな会話の直近のやり取りをテキスト化して返す（文脈継続用）。
+
+        DM ではスレッドを使わず連続して質問されることが多いため、
+        直近メッセージを履歴として扱う。コマンド実行や古いメッセージは除外。
+        """
+        try:
+            from slack_sdk import WebClient
+            resp = WebClient(token=self._bot_token).conversations_history(
+                channel=channel, limit=limit + 2)
+            import time as _time
+            lines = []
+            for msg in reversed(resp.get("messages", [])):  # 古い順に
+                if msg.get("ts") == current_ts:
+                    continue
+                # 30分より古いやり取りは文脈にしない（別トピックの可能性が高い）
+                if current_ts and float(current_ts) - float(msg.get("ts", 0)) > 1800:
+                    continue
+                text = (msg.get("text") or "").strip()
+                if not text:
+                    continue
+                speaker = "Bot" if (msg.get("bot_id") or msg.get("user") == self._bot_user_id) else "ユーザー"
+                text = text.split("📚")[0].strip()
+                lines.append(f"{speaker}: {text[:300]}")
+            return "\n".join(lines[-limit:])
+        except Exception as e:
+            logger.warning(f"DM 履歴取得失敗: {e}")
             return ""
 
     def _search_and_answer(self, query: str, history: str = "") -> str:
@@ -1055,11 +1088,12 @@ class SlackBot:
             user = event.get("user", "")
             channel = event["channel"]
 
-            # DM のスレッド返信なら文脈を取得
-            history = ""
+            # DM の文脈取得: スレッド返信ならスレッド履歴、フラットな連続質問なら直近の会話
             if event.get("thread_ts"):
                 history = self._fetch_thread_history(
                     channel, event["thread_ts"], current_ts=event.get("ts", ""))
+            else:
+                history = self._fetch_dm_history(channel, current_ts=event.get("ts", ""))
 
             cmd, bot_ts = self._dispatch(text, user, channel, say,
                                           thread_ts=None, history=history)
