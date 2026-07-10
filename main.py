@@ -306,6 +306,16 @@ def run_weekly_report(config: dict, reference_dt: datetime = None):
         )
         kb.generate(backlog_activities, week_start, week_end, meeting_docs=meeting_docs)
 
+        # SmartSync 日次同期分など embedding 未設定のドキュメントを検索対象化
+        if vector_store:
+            try:
+                from src.manual_jobs import backfill_embeddings
+                n = backfill_embeddings(vector_store)
+                if n:
+                    logger.info(f"embedding 補完: {n} 件を検索対象に追加")
+            except Exception as e:
+                logger.warning(f"embedding 補完失敗: {e}")
+
     duration = _time.monotonic() - _started_at
     logger.info(f"\n✅ Wasabi 完了（所要時間: {duration:.1f}秒）")
     logger.info("=" * 60)

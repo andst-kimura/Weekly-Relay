@@ -213,12 +213,40 @@ def collect_kb(config: dict, since: datetime, until: datetime) -> dict:
     )
     kb.generate(backlog, since, until, meeting_docs=meeting)
 
+    # SmartSync 日次同期分など embedding 未設定のドキュメントを検索対象化
+    backfilled = 0
+    if vector_store:
+        try:
+            backfilled = backfill_embeddings(vector_store)
+        except Exception as e:
+            errors.append(f"embedding 補完失敗: {e}")
+
     return {
         "backlog": len(backlog),
         "meeting": len(meeting),
         "members": len(team_members),
+        "backfilled": backfilled,
         "errors": errors,
     }
+
+
+def backfill_embeddings(vector_store) -> int:
+    """embedding 未設定の KB ドキュメント（SmartSync 収集分含む）をベクトル化する。
+
+    SmartSync の日次同期で作られたドキュメントは embedding を持たないため、
+    収集ジョブの最後に呼んで RAG 検索対象に含める。戻り値は処理件数。
+    """
+    from src.smartsync_client import list_context_snapshots_without_embedding
+    docs = list_context_snapshots_without_embedding()
+    if not docs:
+        return 0
+    logger.info(f"embedding 補完: {len(docs)} 件")
+    for doc_id, data in docs:
+        try:
+            vector_store.upsert(doc_id, data)
+        except Exception as e:
+            logger.warning(f"embedding 補完失敗 ({doc_id}): {e}")
+    return len(docs)
 
 
 # --------------------------------------------------------------------------- #
