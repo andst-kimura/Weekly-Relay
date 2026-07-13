@@ -189,6 +189,13 @@ def save_doc(collection: str, doc_id: str, data: dict) -> None:
         )
 
 
+def delete_doc(collection: str, doc_id: str) -> bool:
+    """任意コレクションのドキュメントを削除する（存在しなくても True）"""
+    url = _doc_url(collection, doc_id)
+    resp = _get_session().delete(url, timeout=30)
+    return resp.status_code in (200, 204, 404)
+
+
 def add_doc(collection: str, data: dict) -> None:
     """任意コレクションに自動 ID でドキュメントを追加する。"""
     url = _col_url(collection)

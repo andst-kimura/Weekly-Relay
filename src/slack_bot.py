@@ -244,18 +244,12 @@ class SlackBot:
         # slack_user_id -> backlog_user_id のマッピング（myself + team_members から構築）
         self._slack_to_backlog: dict[str, int] = slack_user_to_backlog or {}
         self._bot_user_id: str = ""
-        # thread_ts → bot が投稿した返信の ts（削除用）
-        # DM は channel_id → bot が投稿した最新 ts
-        self._reply_ts: dict[str, str] = {}
         # Backlog project_id キャッシュ
         self._project_id_cache: dict[str, int] = {}
         # 手動実行ジョブ用（議事録収集・転記）
+        # 状態（ロック・プレビュー・完了待ち・削除用ts）は src/bot_state.py 経由で
+        # Firestore に永続化する（再起動・マルチインスタンス対応）
         self._config = config or {}
-        self._job_running = False
-        # 実行中ジョブの完了待ちリスト: [(say_fn, kwargs), ...]
-        self._job_waiters: list[tuple] = []
-        # 転記プレビュー保持: pending_id → prepared dict
-        self._pending_posts: dict[str, dict] = {}
 
     def _get_backlog_project_id(self, project_key: str) -> int | None:
         """プロジェクトキーから project_id を取得（キャッシュ付き）"""
@@ -407,13 +401,15 @@ class SlackBot:
     #  手動実行: 議事録収集
     # ------------------------------------------------------------------ #
 
-    def _handle_collect_minutes(self, raw_text: str, say_fn, kwargs: dict) -> None:
+    def _handle_collect_minutes(self, raw_text: str, say_fn, kwargs: dict,
+                                  channel: str = "") -> None:
         """議事録収集をバックグラウンドで実行し、完了時にスレッドへ返信する"""
+        from src import bot_state
         if not self._config:
             say_fn(text="⚠️ Bot に config が渡されていないため実行できません。", **kwargs)
             return
-        if self._job_running:
-            self._job_waiters.append((say_fn, kwargs))
+        if not bot_state.acquire_job_lock("collect_minutes"):
+            bot_state.add_job_waiter(channel, kwargs.get("thread_ts", ""))
             say_fn(text="⏳ 現在別の収集ジョブが実行中です。完了したらお知らせします。", **kwargs)
             return
 
@@ -425,7 +421,6 @@ class SlackBot:
         )
 
         def _worker():
-            self._job_running = True
             try:
                 from src.manual_jobs import collect_meeting_docs
                 result = collect_meeting_docs(self._config, since, until)
@@ -446,7 +441,8 @@ class SlackBot:
                 say_fn(text=f"⚠️ 議事録収集に失敗しました: {e}", **kwargs)
                 self._notify_waiters(f"⚠️ 実行中だった議事録収集は失敗しました: {e}")
             finally:
-                self._job_running = False
+                from src import bot_state as _bs
+                _bs.release_job_lock()
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -648,23 +644,32 @@ class SlackBot:
                 "・（チャンネル内で）`設定 マッピング削除`")
 
     def _notify_waiters(self, message: str) -> None:
-        """ジョブ完了を待っている全ユーザーへ通知する"""
-        waiters, self._job_waiters = self._job_waiters, []
-        for w_say, w_kwargs in waiters:
-            try:
-                w_say(text=message, **w_kwargs)
-            except Exception as e:
-                logger.warning(f"待機者への通知失敗: {e}")
+        """ジョブ完了を待っている全ユーザーへ通知する（Firestore の待機リストから）"""
+        from src import bot_state
+        try:
+            waiters = bot_state.pop_job_waiters()
+        except Exception as e:
+            logger.warning(f"待機リスト取得失敗: {e}")
+            return
+        if not waiters:
+            return
+        try:
+            from slack_sdk import WebClient
+            client = WebClient(token=self._bot_token)
+            for w in waiters:
+                params = {"channel": w["channel"], "text": message}
+                if w.get("thread_ts"):
+                    params["thread_ts"] = w["thread_ts"]
+                client.chat_postMessage(**params)
+        except Exception as e:
+            logger.warning(f"待機者への通知失敗: {e}")
 
-    def _handle_collect_kb(self, raw_text: str, say_fn, kwargs: dict) -> None:
+    def _handle_collect_kb(self, raw_text: str, say_fn, kwargs: dict,
+                             channel: str = "") -> None:
         """Backlog・Slack・議事録の全収集をバックグラウンドで実行する"""
+        from src import bot_state
         if not self._config:
             say_fn(text="⚠️ Bot に config が渡されていないため実行できません。", **kwargs)
-            return
-        if self._job_running:
-            # 完了待ちリストに登録し、完了時に通知する
-            self._job_waiters.append((say_fn, kwargs))
-            say_fn(text="⏳ 現在別の収集ジョブが実行中です。完了したらお知らせします。", **kwargs)
             return
 
         from src.manual_jobs import is_fresh, FRESHNESS_MINUTES
@@ -682,6 +687,11 @@ class SlackBot:
                 )
                 return
 
+        if not bot_state.acquire_job_lock("collect_kb"):
+            bot_state.add_job_waiter(channel, kwargs.get("thread_ts", ""))
+            say_fn(text="⏳ 現在別の収集ジョブが実行中です。完了したらお知らせします。", **kwargs)
+            return
+
         since, until = _parse_range(raw_text)
         say_fn(
             text=f"🔄 情報収集を開始しました（{since.strftime('%m/%d')}〜{until.strftime('%m/%d')}）\n"
@@ -690,7 +700,6 @@ class SlackBot:
         )
 
         def _worker():
-            self._job_running = True
             try:
                 from src.manual_jobs import collect_kb, mark_success
                 result = collect_kb(self._config, since, until)
@@ -713,7 +722,8 @@ class SlackBot:
                 say_fn(text=f"⚠️ 情報収集に失敗しました: {e}", **kwargs)
                 self._notify_waiters(f"⚠️ 実行中だった情報収集は失敗しました: {e}")
             finally:
-                self._job_running = False
+                from src import bot_state as _bs
+                _bs.release_job_lock()
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -721,12 +731,14 @@ class SlackBot:
     #  手動実行: Backlog 転記（プレビュー → ボタン確認）
     # ------------------------------------------------------------------ #
 
-    def _handle_post_preview(self, raw_text: str, say_fn, kwargs: dict) -> None:
+    def _handle_post_preview(self, raw_text: str, say_fn, kwargs: dict,
+                               channel: str = "") -> None:
         """転記プレビューを生成し、確認ボタン付きで返信する"""
+        from src import bot_state
         if not self._config:
             say_fn(text="⚠️ Bot に config が渡されていないため実行できません。", **kwargs)
             return
-        if self._job_running:
+        if not bot_state.acquire_job_lock("post_preview"):
             say_fn(text="⏳ 別のジョブが実行中です。完了までお待ちください。", **kwargs)
             return
 
@@ -746,12 +758,15 @@ class SlackBot:
         )
 
         def _worker():
-            self._job_running = True
             try:
                 from src.manual_jobs import prepare_backlog_post
                 prepared = prepare_backlog_post(self._config, since, until)
                 pending_id = uuid.uuid4().hex[:12]
-                self._pending_posts[pending_id] = prepared
+                # 期間メタのみ永続化（実行時に再収集する。キャッシュが効くため高速）
+                bot_state.save_pending_post(pending_id, {
+                    "since": since.isoformat(),
+                    "until": until.isoformat(),
+                })
 
                 dry_run = self._config.get("report", {}).get("dry_run", False)
                 dry_note = "（dry_run 有効: 実際には書き込みません）" if dry_run else ""
@@ -790,26 +805,30 @@ class SlackBot:
                 logger.error(f"転記プレビュー作成失敗: {e}")
                 say_fn(text=f"⚠️ プレビュー作成に失敗しました: {e}", **kwargs)
             finally:
-                self._job_running = False
+                bot_state.release_job_lock()
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _execute_post(self, pending_id: str, say_fn) -> None:
         """確認ボタン押下後の転記実行（バックグラウンド）"""
-        prepared = self._pending_posts.pop(pending_id, None)
-        if not prepared:
+        from src import bot_state
+        meta = bot_state.pop_pending_post(pending_id)
+        if not meta:
             say_fn(text="⚠️ このプレビューは期限切れです。もう一度 `転記` コマンドを実行してください。")
             return
-        if self._job_running:
+        if not bot_state.acquire_job_lock("execute_post"):
             say_fn(text="⏳ 別のジョブが実行中です。完了までお待ちください。")
             return
 
         say_fn(text="🔄 Backlog へ転記中...")
 
         def _worker():
-            self._job_running = True
             try:
-                from src.manual_jobs import execute_backlog_post
+                from src.manual_jobs import prepare_backlog_post, execute_backlog_post
+                # プレビュー時の期間で再収集（当日キャッシュが効くため高速）
+                since = datetime.fromisoformat(meta["since"])
+                until = datetime.fromisoformat(meta["until"])
+                prepared = prepare_backlog_post(self._config, since, until)
                 results = execute_backlog_post(self._config, prepared)
                 base_url = (self._config.get("backlog", {}) or {}).get(
                     "base_url", "https://adastria.backlog.jp").rstrip("/")
@@ -831,7 +850,7 @@ class SlackBot:
                 logger.error(f"Backlog 転記失敗: {e}")
                 say_fn(text=f"⚠️ 転記に失敗しました: {e}")
             finally:
-                self._job_running = False
+                bot_state.release_job_lock()
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -956,8 +975,9 @@ class SlackBot:
 
         # 削除コマンド
         if text.lower() in _DELETE_COMMANDS:
+            from src import bot_state
             key = thread_ts if thread_ts else channel
-            bot_ts = self._reply_ts.pop(key, None)
+            bot_ts = bot_state.pop_reply_ts(key)
             if bot_ts:
                 # say_fn の client は外側スコープから渡せないため、削除は呼び出し元で処理
                 return "_delete_", bot_ts
@@ -975,17 +995,17 @@ class SlackBot:
 
         # 議事録収集コマンド
         if any(text.lower().startswith(p.lower()) for p in _COLLECT_PREFIXES):
-            self._handle_collect_minutes(text, say_fn, kwargs)
+            self._handle_collect_minutes(text, say_fn, kwargs, channel=channel)
             return None, None
 
         # 全 KB 収集コマンド（Backlog + Slack + 議事録）
         if any(text.lower().startswith(p.lower()) for p in _KB_COLLECT_PREFIXES):
-            self._handle_collect_kb(text, say_fn, kwargs)
+            self._handle_collect_kb(text, say_fn, kwargs, channel=channel)
             return None, None
 
         # Backlog 転記コマンド（プレビュー → ボタン確認）
         if any(text.lower().startswith(p.lower()) for p in _POST_PREFIXES):
-            self._handle_post_preview(text, say_fn, kwargs)
+            self._handle_post_preview(text, say_fn, kwargs, channel=channel)
             return None, None
 
         # 経緯サマリーコマンド
@@ -1023,8 +1043,9 @@ class SlackBot:
         answer = self._search_and_answer(text, history=history)
         resp = say_fn(text=answer, **kwargs)
         if resp and resp.get("ts"):
+            from src import bot_state
             store_key = thread_ts if thread_ts else channel
-            self._reply_ts[store_key] = resp["ts"]
+            bot_state.save_reply_ts(store_key, resp["ts"])
         return None, None
 
     def run(self):
@@ -1065,7 +1086,8 @@ class SlackBot:
                 # thread_ts がある場合はスレッドの根 ts がキー
                 key = event.get("thread_ts")
                 if key:
-                    actual_ts = self._reply_ts.pop(key, bot_ts)
+                    from src import bot_state
+                    actual_ts = bot_state.pop_reply_ts(key) or bot_ts
                 else:
                     actual_ts = bot_ts
                 try:
@@ -1133,7 +1155,8 @@ class SlackBot:
         def handle_post_cancel(ack, body, client):
             ack()
             pending_id = body["actions"][0]["value"]
-            self._pending_posts.pop(pending_id, None)
+            from src import bot_state
+            bot_state.pop_pending_post(pending_id)
             channel = body["channel"]["id"]
             msg = body.get("message", {}) or {}
             try:
