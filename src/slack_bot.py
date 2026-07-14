@@ -38,6 +38,9 @@ _RANGE_RE = re.compile(
 )
 # 課題キーのパターン（例: SALES_TEAM-23, MOBILEPOS-45）
 _ISSUE_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
+# 指示語（直前の会話への参照）パターン。これを含む質問のみ履歴を検索クエリに結合する
+_ANAPHORA_RE = re.compile(
+    r"それ|その|そっち|あれ|あの件|この件|これら|上記|前述|先ほど|さっき|同件|続き|再度|もう一度|他には|ほかに")
 # 日付パターン（期限抽出用）: YYYY/MM/DD, YYYY-MM-DD, MM/DD, M/D
 _DATE_RE = re.compile(
     r"(?:(?P<y>\d{4})[/-])?(?P<m>\d{1,2})[/-](?P<d>\d{1,2})"
@@ -890,6 +893,9 @@ class SlackBot:
                 speaker = "Bot" if (msg.get("bot_id") or msg.get("user") == self._bot_user_id) else "ユーザー"
                 # 出典ブロックは履歴に不要なので除去
                 text = text.split("📚")[0].strip()
+                # 情報を含まない返答は文脈として無意味なので除外
+                if "該当情報がありません" in text or text.startswith(("🔄", "⏳", "✅", "⚠️")):
+                    continue
                 lines.append(f"{speaker}: {text[:300]}")
             return "\n".join(lines[-limit:])
         except Exception as e:
@@ -919,6 +925,8 @@ class SlackBot:
                     continue
                 speaker = "Bot" if (msg.get("bot_id") or msg.get("user") == self._bot_user_id) else "ユーザー"
                 text = text.split("📚")[0].strip()
+                if "該当情報がありません" in text or text.startswith(("🔄", "⏳", "✅", "⚠️")):
+                    continue
                 lines.append(f"{speaker}: {text[:300]}")
             return "\n".join(lines[-limit:])
         except Exception as e:
@@ -934,8 +942,10 @@ class SlackBot:
             )
         # フィルタ構文（種別: / 期間:）を抽出
         query, filters = _extract_filters(query)
-        # 指示語を含む短い質問は、履歴と結合して検索クエリを補強する
-        search_query = f"{history}\n{query}" if (history and len(query) <= 30) else query
+        # 指示語（それ・その 等）を含む質問のみ、履歴と結合して検索クエリを補強する。
+        # 単に短いだけの独立した質問に履歴を混ぜると、無関係な話題に検索が引きずられるため
+        is_anaphoric = bool(_ANAPHORA_RE.search(query))
+        search_query = f"{history}\n{query}" if (history and is_anaphoric) else query
         results = self.vs.search(search_query, n_results=self.n_results, filters=filters)
         if not results:
             return "KB に該当情報が見つかりませんでした。"
