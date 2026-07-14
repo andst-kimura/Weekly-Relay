@@ -110,6 +110,9 @@ def convert(wasabi_doc_id: str, wasabi_data: dict) -> tuple[str, dict] | None:
         backlog_updated_at = wasabi_data.get("backlog_updated_at", "")
         if backlog_updated_at:
             sm_data["backlog_updated_at"] = backlog_updated_at
+        # 人ナビ（詳しい人の推定）用に担当者を構造化保存
+        if assignee and assignee != "未設定":
+            sm_data["assignee"] = assignee
         return doc_id, sm_data
 
     # ----- Slack (slack → slack) -----

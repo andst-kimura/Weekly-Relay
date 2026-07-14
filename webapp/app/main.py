@@ -31,7 +31,7 @@ except ImportError:
 
 from fastapi import FastAPI, Request, Response
 
-from app.routers import kb, pages, teams
+from app.routers import kb, pages, qa, teams
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -58,6 +58,7 @@ async def add_security_headers(request: Request, call_next) -> Response:
 app.include_router(pages.router, tags=["pages"])
 app.include_router(teams.router, prefix="/api", tags=["api"])
 app.include_router(kb.router, prefix="/api", tags=["kb"])
+app.include_router(qa.router, prefix="/api", tags=["qa"])
 
 
 @app.get("/healthz")

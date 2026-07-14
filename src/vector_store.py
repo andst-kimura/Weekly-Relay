@@ -124,7 +124,7 @@ class VectorStore:
             "source_type": data.get("source_type", ""),
             "doc_id": doc_id,
         }
-        for key in ("source_key", "source_name", "project_id", "source_url",
+        for key in ("source_key", "source_name", "project_id", "source_url", "assignee",
                     "issue_key", "channel_name", "week_label", "display_name"):
             val = data.get(key)
             if val:

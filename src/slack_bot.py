@@ -32,6 +32,7 @@ _POST_PREFIXES = ("backlog転記", "転記", "post")
 _SETTINGS_PREFIXES = ("設定確認", "設定", "config")
 _MYID_PREFIXES = ("私のid", "自分のid", "myid", "my id")
 _TIMELINE_PREFIXES = ("経緯", "timeline")
+_EXPERT_PREFIXES = ("詳しい人", "担当は", "who")
 # 期間指定パターン（例: 7/1-7/7, 07/01〜07/07）
 _RANGE_RE = re.compile(
     r"(?P<m1>\d{1,2})/(?P<d1>\d{1,2})\s*[-〜~]\s*(?P<m2>\d{1,2})/(?P<d2>\d{1,2})"
@@ -52,7 +53,8 @@ _HELP_TEXT = """\
 
 *🔍 調べる*
 ```質問文をそのまま送信      … KB を検索して AI が回答（出典リンク付き）
-経緯 SALES_TEAM-27       … 課題の時系列サマリー（引き継ぎ・報告用）```
+経緯 SALES_TEAM-27       … 課題の時系列サマリー（引き継ぎ・報告用）
+詳しい人 マケプレ         … トピックに詳しい人を KB から推定```
 　◦ 絞り込み: `種別:議事録 期間:今週 ポスタスの議論`（種別: 議事録/チケット/slack、期間: 今週/先週/今月/N日/M/D-M/D）
 　◦ スレッド内・DM の追い質問は直前の会話の文脈を引き継ぎます
 
@@ -933,29 +935,157 @@ class SlackBot:
             logger.warning(f"DM 履歴取得失敗: {e}")
             return ""
 
-    def _search_and_answer(self, query: str, history: str = "") -> str:
-        """クエリを KB 検索 → Gemini で回答生成（出典リンク付き・スレッド文脈対応）"""
+    def _answer_query(self, query: str, history: str = "") -> tuple[str, dict]:
+        """クエリを KB 検索 → Gemini で回答生成。
+
+        戻り値: (回答テキスト, info)
+        info = {"answered": bool, "doc_ids": [str], "used_history": bool, "results": list}
+        """
+        info = {"answered": False, "doc_ids": [], "used_history": False, "results": []}
         if self.vs.count() == 0:
             return (
                 "KB にデータがありません。\n"
                 "`python main.py --only kb` を実行してインデックスを構築してください。"
-            )
+            ), info
         # フィルタ構文（種別: / 期間:）を抽出
         query, filters = _extract_filters(query)
         # 指示語（それ・その 等）を含む質問のみ、履歴と結合して検索クエリを補強する。
         # 単に短いだけの独立した質問に履歴を混ぜると、無関係な話題に検索が引きずられるため
         is_anaphoric = bool(_ANAPHORA_RE.search(query))
         search_query = f"{history}\n{query}" if (history and is_anaphoric) else query
+        info["used_history"] = bool(history and is_anaphoric)
         results = self.vs.search(search_query, n_results=self.n_results, filters=filters)
+        info["results"] = results
+        info["doc_ids"] = [r["doc_id"] for r in results]
         if not results:
-            return "KB に該当情報が見つかりませんでした。"
+            return "KB に該当情報が見つかりませんでした。", info
         answer = self.gemini.answer_with_context(query, results, history=history)
         if not answer:
-            return "回答の生成に失敗しました。"
+            return "回答の生成に失敗しました。", info
         # 「該当情報なし」の場合は出典を付けない
         if "該当情報がありません" in answer:
-            return answer
-        return answer + self._format_sources(results)
+            return answer, info
+        info["answered"] = True
+        return answer + self._format_sources(results), info
+
+    def _search_and_answer(self, query: str, history: str = "") -> str:
+        """後方互換ラッパー（回答テキストのみ返す）"""
+        answer, _ = self._answer_query(query, history)
+        return answer
+
+    def _log_qa(self, question: str, user: str, channel: str,
+                 is_dm: bool, info: dict) -> str:
+        """質問と回答結果を wasabi_qa_logs に記録し、doc_id を返す（失敗時は空文字）"""
+        try:
+            import time as _time
+            from src import smartsync_client as sc
+            qa_id = f"qa_{int(_time.time() * 1000)}"
+            sc.save_doc("wasabi_qa_logs", qa_id, {
+                "question": question[:500],
+                "answered": info.get("answered", False),
+                "doc_ids": info.get("doc_ids", [])[:10],
+                "used_history": info.get("used_history", False),
+                "user": user,
+                "channel": channel,
+                "is_dm": is_dm,
+                "created_at": datetime.now(timezone.utc),
+            })
+            return qa_id
+        except Exception as e:
+            logger.warning(f"qa ログ記録失敗: {e}")
+            return ""
+
+    @staticmethod
+    def _feedback_block(qa_id: str) -> dict:
+        """回答末尾に付けるフィードバックボタン"""
+        return {
+            "type": "actions",
+            "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "👍 役立った"},
+                 "action_id": "wasabi_fb_good", "value": qa_id},
+                {"type": "button", "text": {"type": "plain_text", "text": "👎 いまいち"},
+                 "action_id": "wasabi_fb_bad", "value": qa_id},
+            ],
+        }
+
+    @staticmethod
+    def _text_to_blocks(text: str, max_len: int = 2900) -> list[dict]:
+        """テキストを Slack section ブロック（3000字制限）に分割する"""
+        blocks = []
+        while text:
+            chunk, text = text[:max_len], text[max_len:]
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": chunk}})
+        return blocks
+
+    # ------------------------------------------------------------------ #
+    #  人ナビ（詳しい人の推定）
+    # ------------------------------------------------------------------ #
+
+    # 発言・コメント行のパターン: [日時] 名前: 内容
+    _SPEAKER_RE = re.compile(r"\[[\d\-T:/\s]{4,20}\]\s*★?([^:：\n]{2,25})[:：]")
+    _ASSIGNEE_RE = re.compile(r"担当者[:：]\s*([^\n]{2,30})")
+    _NAME_EXCLUDES = {"不明", "未設定", "自分", "Bot", "ユーザー", "システム", "wasabi"}
+
+    def _find_experts(self, query: str, results: list[dict] = None) -> list[dict]:
+        """KB の担当者・発言者データから、トピックに詳しい人を推定する。
+
+        戻り値: [{"name": str, "count": int, "evidence": str（doc タイトル）}] 上位3名
+        """
+        if results is None:
+            results = self.vs.search(query, n_results=8)
+        scores: dict[str, dict] = {}
+
+        def _add(name: str, weight: int, evidence: str):
+            # 正規化: 部門サフィックス「（DX本部）」と英語名併記「Claire Lee」を除去して
+            # 表記ゆれ（李 若洵 Claire Lee（DX戦略部） / 李 若洵）を同一人物に集約する
+            name = re.sub(r"[（(].*$", "", name.strip())
+            name = re.sub(r"[A-Za-z][A-Za-z .\-]*$", "", name).strip()
+            if not name or len(name) < 2:
+                return
+            if any(ex.lower() in name.lower() for ex in self._NAME_EXCLUDES):
+                return
+            entry = scores.setdefault(name, {"count": 0, "evidence": evidence})
+            entry["count"] += weight
+
+        for r in results:
+            meta = r.get("meta", {}) or {}
+            title = meta.get("source_name", "") or r.get("doc_id", "")
+            text = r.get("text", "")
+            # 担当者フィールド（構造化 or ai_text 内の表記）は重み大
+            assignee = meta.get("assignee", "")
+            if assignee:
+                _add(assignee, 5, title)
+            for m in self._ASSIGNEE_RE.finditer(text):
+                _add(m.group(1), 5, title)
+            # コメント・発言行
+            for m in self._SPEAKER_RE.finditer(text):
+                _add(m.group(1), 1, title)
+
+        ranked = sorted(scores.items(), key=lambda x: -x[1]["count"])[:3]
+        return [{"name": n, "count": v["count"], "evidence": v["evidence"]}
+                for n, v in ranked if v["count"] >= 2]
+
+    def _format_experts(self, experts: list[dict], lead: str) -> str:
+        lines = [lead]
+        medals = ["①", "②", "③"]
+        for i, e in enumerate(experts):
+            lines.append(f"　{medals[i]} *{e['name']}*（関連する言及 {e['count']} 件・例: {e['evidence'][:40]}）")
+        return "\n".join(lines)
+
+    def _handle_experts(self, raw_text: str) -> str:
+        """`詳しい人 トピック` コマンド"""
+        topic = raw_text
+        for prefix in _EXPERT_PREFIXES:
+            if topic.lower().startswith(prefix.lower()):
+                topic = topic[len(prefix):].strip(" 　:：は")
+                break
+        if not topic:
+            return "トピックを指定してください。\n例: `詳しい人 マケプレ`"
+        experts = self._find_experts(topic)
+        if not experts:
+            return f"「{topic}」に関する担当者・発言者を KB から特定できませんでした。"
+        return self._format_experts(
+            experts, f"👥 *「{topic}」に関与が多い人*（KB の担当者・発言記録から推定）")
 
     def _dispatch(self, text: str, user: str, channel: str, say_fn,
                    thread_ts: str = None, history: str = ""):
@@ -1028,10 +1158,31 @@ class SlackBot:
             say_fn(text=reply, **kwargs)
             return None, None
 
+        # 詳しい人コマンド（人ナビ）
+        if any(text.lower().startswith(p.lower()) for p in _EXPERT_PREFIXES):
+            say_fn(text=self._handle_experts(text), **kwargs)
+            return None, None
+
         # KB 質問（RAG）
         logger.info(f"Slack Bot 質問受信: {text}")
-        answer = self._search_and_answer(text, history=history)
-        resp = say_fn(text=answer, **kwargs)
+        answer, info = self._answer_query(text, history=history)
+
+        # 該当なしの場合、関係者の紹介で救済を試みる
+        if not info.get("answered") and info.get("results"):
+            try:
+                experts = self._find_experts(text, results=info["results"])
+                if experts:
+                    answer += "\n\n" + self._format_experts(
+                        experts, "💡 KB に直接の答えはありませんが、関連が深いのは:")
+            except Exception as e:
+                logger.warning(f"関係者推定失敗: {e}")
+
+        # 質問ログ + フィードバックボタン
+        qa_id = self._log_qa(text, user, channel, is_dm=(thread_ts is None), info=info)
+        blocks = None
+        if qa_id:
+            blocks = self._text_to_blocks(answer) + [self._feedback_block(qa_id)]
+        resp = say_fn(text=answer, blocks=blocks, **kwargs) if blocks else say_fn(text=answer, **kwargs)
         if resp and resp.get("ts"):
             from src import bot_state
             store_key = thread_ts if thread_ts else channel
@@ -1155,6 +1306,39 @@ class SlackBot:
                     text="❌ 転記をキャンセルしました。", blocks=[])
             except Exception:
                 client.chat_postMessage(channel=channel, text="❌ 転記をキャンセルしました。")
+
+        def _handle_feedback(ack, body, client, feedback: str):
+            ack()
+            qa_id = body["actions"][0]["value"]
+            user = (body.get("user") or {}).get("id", "")
+            try:
+                from src import smartsync_client as sc
+                sc.save_doc("wasabi_qa_logs", qa_id, {
+                    "feedback": feedback, "feedback_by": user})
+            except Exception as e:
+                logger.warning(f"フィードバック記録失敗 ({qa_id}): {e}")
+            # ボタンを消して謝辞に差し替え（二度押し防止）
+            try:
+                msg = body.get("message", {}) or {}
+                blocks = [b for b in msg.get("blocks", []) if b.get("type") != "actions"]
+                note = ("🙏 フィードバックありがとうございます。"
+                        if feedback == "good" else
+                        "🙏 フィードバックありがとうございます。差し支えなければ、"
+                        "期待していた答えをこのスレッドで教えてください（改善に活用します）。")
+                blocks.append({"type": "context",
+                               "elements": [{"type": "mrkdwn", "text": note}]})
+                client.chat_update(channel=body["channel"]["id"], ts=msg.get("ts"),
+                                   text=msg.get("text", ""), blocks=blocks)
+            except Exception as e:
+                logger.warning(f"フィードバック後の更新失敗: {e}")
+
+        @app.action("wasabi_fb_good")
+        def handle_fb_good(ack, body, client):
+            _handle_feedback(ack, body, client, "good")
+
+        @app.action("wasabi_fb_bad")
+        def handle_fb_bad(ack, body, client):
+            _handle_feedback(ack, body, client, "bad")
 
         @app.event("app_home_opened")
         def handle_app_home(event, client):

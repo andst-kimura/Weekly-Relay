@@ -1,0 +1,94 @@
+{% extends "_base.html" %}
+{% block title %}Bot 利用状況 | Wasabi Admin{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">📊 Bot 利用状況</h4>
+  <select class="form-select form-select-sm w-auto" id="days" onchange="loadAll()">
+    <option value="7">直近7日</option>
+    <option value="30" selected>直近30日</option>
+    <option value="90">直近90日</option>
+  </select>
+</div>
+
+<div class="row g-3 mb-4" id="stats-cards">
+  <div class="col-12 text-muted">読み込み中...</div>
+</div>
+
+<ul class="nav nav-pills mb-3">
+  <li class="nav-item"><button class="nav-link active" data-f="" onclick="setFilter(this)">すべての質問</button></li>
+  <li class="nav-item"><button class="nav-link" data-f="unanswered" onclick="setFilter(this)">答えられなかった質問</button></li>
+  <li class="nav-item"><button class="nav-link" data-f="bad" onclick="setFilter(this)">👎 が付いた質問</button></li>
+</ul>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead class="table-light">
+        <tr><th style="width:140px">日時</th><th>質問</th>
+            <th style="width:80px">回答</th><th style="width:60px">FB</th><th style="width:60px">経路</th></tr>
+      </thead>
+      <tbody id="log-tbody"><tr><td colspan="5" class="text-muted">読み込み中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+let FILTER = "";
+
+async function loadStats() {
+  const days = document.getElementById("days").value;
+  const wrap = document.getElementById("stats-cards");
+  try {
+    const s = await api(`/api/qa/stats?days=${days}`);
+    wrap.innerHTML = `
+      <div class="col-md-3"><div class="card p-3 text-center">
+        <div class="fs-2 fw-bold">${s.total}</div><div class="text-muted small">質問数</div></div></div>
+      <div class="col-md-3"><div class="card p-3 text-center">
+        <div class="fs-2 fw-bold ${s.unanswered_rate > 20 ? "text-danger" : ""}">${s.unanswered_rate}%</div>
+        <div class="text-muted small">該当なし率（${s.unanswered}件）</div></div></div>
+      <div class="col-md-3"><div class="card p-3 text-center">
+        <div class="fs-2 fw-bold">👍 ${s.feedback_good}</div><div class="text-muted small">役立った</div></div></div>
+      <div class="col-md-3"><div class="card p-3 text-center">
+        <div class="fs-2 fw-bold">👎 ${s.feedback_bad}</div><div class="text-muted small">いまいち</div></div></div>`;
+  } catch (e) {
+    wrap.innerHTML = `<div class="col-12 text-danger">${e.message}</div>`;
+  }
+}
+
+async function loadLogs() {
+  const days = document.getElementById("days").value;
+  const tbody = document.getElementById("log-tbody");
+  tbody.innerHTML = '<tr><td colspan="5" class="text-muted">読み込み中...</td></tr>';
+  try {
+    const r = await api(`/api/qa/logs?filter=${FILTER}&days=${days}&limit=100`);
+    if (!r.logs.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="text-muted">該当なし</td></tr>';
+      return;
+    }
+    tbody.innerHTML = r.logs.map(l => `
+      <tr>
+        <td class="small text-muted">${l.created_at.replace("T", " ")}</td>
+        <td>${(l.question || "").replace(/</g, "&lt;")}</td>
+        <td>${l.answered ? '<span class="badge badge-on">回答</span>' : '<span class="badge bg-warning text-dark">該当なし</span>'}</td>
+        <td>${l.feedback === "good" ? "👍" : l.feedback === "bad" ? "👎" : ""}</td>
+        <td class="small text-muted">${l.is_dm ? "DM" : "Ch"}${l.used_history ? "・文脈" : ""}</td>
+      </tr>`).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="text-danger">${e.message}</td></tr>`;
+  }
+}
+
+function setFilter(el) {
+  document.querySelectorAll(".nav-pills .nav-link").forEach(b => b.classList.remove("active"));
+  el.classList.add("active");
+  FILTER = el.dataset.f;
+  loadLogs();
+}
+
+function loadAll() { loadStats(); loadLogs(); }
+loadAll();
+</script>
+{% endblock %}
